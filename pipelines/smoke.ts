@@ -1,5 +1,6 @@
 // Smoke pipeline: three inline steps, no LLM. Proves the contracts, the runner loop and one retry
 // with verify feedback; the library steps (src/steps/) replace these inline ones once they exist.
+// Run it with `npm run start -- --pipeline smoke` (add `--dry-run` for the plan).
 import { NonRetryableError, step, type Pipeline, type Step } from '../src/types.js';
 
 const constant: Step<{ value: string }, string> = {

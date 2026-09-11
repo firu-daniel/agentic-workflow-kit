@@ -4,7 +4,7 @@
 // up to the step's retry policy with the previous failures handed to the next attempt; a thrown error backs off first,
 // a verify failure retries at once. --dry-run prints what a run would do with each step and calls none.
 import { checkpointStore } from './checkpoint.js';
-import { createLogger, stdoutWriter, toText, type LineWriter } from './log.js';
+import { createLogger, errorText, stdoutWriter, toText, type LineWriter } from './log.js';
 import { DEFAULT_RETRY, NonRetryableError } from './types.js';
 import type {
   Checkpoint, Logger, LlmClient, Pipeline, PipelineStep, PlanEntry, RetryPolicy, RunFlags, RunResult, StepContext, StepRecord, TokenUsage,
@@ -172,7 +172,7 @@ async function attemptStep(ps: PipelineStep, ctx: StepContext): Promise<Attempt>
     }
   } catch (err) {
     record.status = 'failed';
-    record.error = err instanceof Error ? err.message : String(err);
+    record.error = errorText(err);
     failures = [record.error];
     retryable = !(err instanceof NonRetryableError);
     thrown = true;

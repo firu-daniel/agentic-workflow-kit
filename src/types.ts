@@ -13,7 +13,7 @@ export interface RunFlags {
   /** Print the execution plan (what a run would do with each step now, given the checkpoint) and return without
    * calling a step or touching runs/. With --fresh the plan shows every step running; the checkpoint stays. */
   dryRun: boolean;
-  /** Let gated steps run (see PipelineStep.gate). */
+  /** Let gated steps run (see PipelineStep.gate). Parsed and passed through; not enforced until the approval gate lands. */
   approve: boolean;
   /** Delete the pipeline's checkpoint before starting, so every step runs again. */
   fresh: boolean;
@@ -103,7 +103,8 @@ export interface PipelineStep<TParams = unknown, TOutput = unknown> {
   verify?: VerifyRule<TOutput>[];
   /** Overrides DEFAULT_RETRY for this step, field by field. */
   retry?: Partial<RetryPolicy>;
-  /** The runner stops before this step unless --approve is passed (human-in-the-loop gate). */
+  /** Human-in-the-loop gate: the runner is to stop before this step unless --approve is passed. Not enforced yet — the
+   * approval gate reads it; today it only shows in the --dry-run plan. */
   gate?: boolean;
 }
 

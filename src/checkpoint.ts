@@ -2,6 +2,7 @@
 // re-run resumes at the first step not completed, deleted when the run completes. Shape: Checkpoint in types.ts.
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { errorText } from './log.js';
 import type { Checkpoint, Logger, Pipeline } from './types.js';
 
 export interface CheckpointStore {
@@ -37,7 +38,7 @@ export function checkpointStore(runsDir: string, pipeline: Pipeline, log: Logger
         log.info('checkpoint loaded', { file, completed: Object.keys(done).length });
         return Object.assign(Object.create(null), done);
       } catch (err) {
-        log.warn('checkpoint ignored', { file, reason: err instanceof Error ? err.message : String(err) });
+        log.warn('checkpoint ignored', { file, reason: errorText(err) });
         return Object.create(null);
       }
     },

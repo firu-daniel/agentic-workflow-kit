@@ -1,4 +1,4 @@
-// The structured key=value logger used by the runner, the CLI (src/index.ts) and any client that needs a `Logger`.
+// The structured key=value logger used by the runner, the CLI (src/cli.ts) and any client that needs a `Logger`.
 // Steps receive it through `ctx.log`.
 import type { Logger } from './types.js';
 
@@ -37,3 +37,6 @@ export function toText(value: unknown): string {
     return '[unprintable]';
   }
 }
+
+/** The message of an Error, or the String of anything else thrown. */
+export const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
