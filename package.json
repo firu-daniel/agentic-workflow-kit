@@ -1,0 +1,21 @@
+{
+  "name": "agentic-workflow-kit",
+  "version": "0.1.0",
+  "description": "A small runner for multi-step agentic workflows: step library, per-step checkpoint and retry, deterministic verification, mock LLM mode.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "author": "Firu Daniel",
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "tsx": "^4.23.0",
+    "typescript": "^5.9.0"
+  }
+}
