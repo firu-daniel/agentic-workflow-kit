@@ -10,11 +10,12 @@ export interface TokenUsage {
 
 /** CLI flags, resolved once per run and visible to every step. */
 export interface RunFlags {
-  /** Print the execution plan and call no step. */
+  /** Print the execution plan (what a run would do with each step now, given the checkpoint) and return without
+   * calling a step or touching runs/. With --fresh the plan shows every step running; the checkpoint stays. */
   dryRun: boolean;
   /** Let gated steps run (see PipelineStep.gate). */
   approve: boolean;
-  /** Ignore an existing checkpoint and start from the first step. */
+  /** Delete the pipeline's checkpoint before starting, so every step runs again. */
   fresh: boolean;
 }
 
@@ -46,18 +47,20 @@ export interface StepContext<TParams = unknown> {
   runId: string;
   stepId: string;
   params: TParams;
-  /** Outputs of the completed earlier steps, by step id. */
-  inputs: Record<string, unknown>;
+  /** Outputs of the completed earlier steps, by step id. A step must not mutate them
+   * (a compile-time guard only: nested values stay mutable). */
+  inputs: Readonly<Record<string, unknown>>;
   llm: LlmClient;
   flags: RunFlags;
   log: Logger;
   /** 1 on the first attempt. */
   attempt: number;
   /** Verify failures (or the thrown error text) of the previous attempt; [] on the first. */
-  previousFailures: string[];
+  previousFailures: readonly string[];
 }
 
 export interface StepResult<TOutput = unknown> {
+  /** Must be JSON-serializable: it is written to the checkpoint and JSON round-tripped on resume. */
   output: TOutput;
   usage?: TokenUsage;
   /** Path of a file the step wrote (e.g. emit), surfaced in the run record. */
@@ -78,9 +81,12 @@ export type VerifyRule<TOutput = unknown> = (
 ) => string[] | Promise<string[]>;
 
 export interface RetryPolicy {
-  /** Total attempts, the first one included. */
+  /** Total attempts, the first one included; a value below 1 still makes one attempt. */
   attempts: number;
-  /** Wait before attempt n is baseDelayMs * 2^(n-2). */
+  /** Wait before attempt n is baseDelayMs * 2^(n-2) when attempt n-1 threw (rate limit, timeout, 5xx); a verify
+   * failure retries at once, the correction coming from `previousFailures`; a step that needs a wait before its next
+   * attempt (a truncated or rate-limited response it detects itself) should throw instead of returning failures.
+   * Uncapped: the wait before the last attempt is baseDelayMs * 2^(attempts-2) (10 attempts at 1000 ms wait 512 s). */
   baseDelayMs: number;
 }
 
@@ -95,7 +101,7 @@ export interface PipelineStep<TParams = unknown, TOutput = unknown> {
   params: TParams;
   /** Run after `uses.verify`; any failure string fails the attempt. */
   verify?: VerifyRule<TOutput>[];
-  /** Overrides DEFAULT_RETRY for this step. */
+  /** Overrides DEFAULT_RETRY for this step, field by field. */
   retry?: Partial<RetryPolicy>;
   /** The runner stops before this step unless --approve is passed (human-in-the-loop gate). */
   gate?: boolean;
@@ -119,7 +125,25 @@ export class NonRetryableError extends Error {
   }
 }
 
-/** Per-step outcome kept by the runner; the run report renders one line per record. */
+/**
+ * `runs/<pipeline>.checkpoint.json`: written after every successful step, read at the next start so the run
+ * resumes at the first step not completed, deleted when the run completes. Ignored with a warning when the
+ * step list no longer matches; `--fresh` deletes it up front. NOT detected: a changed param, or a changed
+ * step implementation under the same `name`.
+ */
+export interface Checkpoint {
+  /** Informational (the file name already keys by pipeline). */
+  pipeline: string;
+  /** The step list the checkpoint was written for, in order. */
+  steps: { id: string; uses: string }[];
+  /** Output (JSON round-tripped) and artifact of each completed step, by id. */
+  completed: Record<string, { output: unknown; artifact?: string }>;
+  updatedAt: string;
+}
+
+/** Per-step outcome kept by the runner; the run report renders one line per record.
+ * `attempts` counts every attempt made; `durationMs` and `usage` are summed across them (backoff waits excluded);
+ * `error` is the last attempt's. `resumed` = output taken from the checkpoint, not run: attempts 0, zero duration and tokens. */
 export type StepStatus = 'done' | 'failed' | 'resumed' | 'gated';
 
 export interface StepRecord {
@@ -138,4 +162,20 @@ export interface RunResult {
   pipeline: string;
   ok: boolean;
   records: StepRecord[];
+  /** Present on a dry run only; `records` is then empty. */
+  plan?: PlanEntry[];
+}
+
+/** One step of the --dry-run plan: the resolved settings and what a real run would do with the step right now. */
+export interface PlanEntry {
+  id: string;
+  uses: string;
+  params: unknown;
+  /** Whether the library step has its own `verify`, and how many pipeline rules follow it. */
+  verify: { step: boolean; rules: number };
+  /** Resolved against DEFAULT_RETRY. */
+  retry: RetryPolicy;
+  gate: boolean;
+  /** `skip` when the checkpoint already holds this step's output. */
+  action: 'run' | 'skip';
 }
