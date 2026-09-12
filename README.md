@@ -37,7 +37,8 @@ configured for the URL; any other 4xx is `NonRetryableError`. An LLM answer cut 
 same cap would cut the retry the same way.
 
 `pipelines/example-changelog.ts` is the demo: the latest Node.js releases from the GitHub API → structured facts →
-outline → changelog post (≥ 600 chars, no URL outside the sources) → `out/changelog.md`.
+outline → changelog post (≥ 600 chars, no URL outside the sources) → `out/changelog.md`. Its `publish` step is gated:
+the first run stops with `runs/example-changelog.review.md` (exit 3); the same command with `--approve` writes the file.
 
 LLM mode is chosen by the environment, not by a flag. `AWK_LLM` names it when set:
 
@@ -68,11 +69,18 @@ with a `pr` param open the pull request — without it the PR is skipped and the
 A pipeline is `pipelines/<name>.ts` with a default export of `{ name, steps }` (see `src/types.ts`);
 a value containing `/` is loaded as a path to such a file, resolved against the cwd (under `npm run`
 that is always the package root, which is also where `runs/` lands). The checkpoint lives at
-`runs/<name>.checkpoint.json` while a run is incomplete; `--fresh` discards it. `--approve` is parsed
-but gates are not enforced yet. Exit code 1 names the step that failed, 2 a usage or pipeline-file
-error. Log lines go to stderr, the plan and the summary to stdout.
+`runs/<name>.checkpoint.json` while a run is incomplete; `--fresh` discards it.
+
+A step marked `gate: true` (the example's `publish`) is the human-in-the-loop point: without
+`--approve` the run stops before it, writes `runs/<name>.review.md` — the step's params, the outputs
+it would consume in full, the completed steps — and exits 3, checkpoint kept. Read the review, then
+re-run the same command with `--approve`: the completed steps resume from the checkpoint and the
+gated step runs first. A dry run shows the stop as `gate` in the action column.
+
+Exit code 1 names the step that failed, 2 a usage or pipeline-file error, 3 a gate waiting for
+approval. Log lines go to stderr, the plan and the summary to stdout.
 
 Status: runner core done (sequential loop, per-step checkpoint and resume, retry with backoff,
 dry-run, CLI), the LLM slot filled (Claude Code CLI, Anthropic SDK client and offline mock,
-picked by environment), the step library and the example pipeline in. The approval gate and the
-per-run report follow.
+picked by environment), the step library, the example pipeline and the approval gate in. The
+per-run report follows.

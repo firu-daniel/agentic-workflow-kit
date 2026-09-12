@@ -204,6 +204,27 @@ test('a re-run resumes the checkpointed step: status=resumed on stderr, the resu
   assert.deepEqual(await listRuns(first.cwd), []);
 });
 
+test('a gated step exits 3 with the review file named on stdout; the same command with --approve resumes and completes', async () => {
+  const run = await cli(['--pipeline', fixture('gated')]);
+  assert.equal(run.code, 3, run.stderr);
+  assert.match(run.stdout, /^run \S+ gated: cli-gated stopped before step "publish" \(constant\); review runs\/cli-gated\.review\.md, then re-run with --approve\n$/);
+  assert.match(run.stderr, /warn run gated .* step=publish uses=constant review=runs\/cli-gated\.review\.md/);
+  assert.doesNotMatch(run.stderr, /^error:/m);
+  assert.deepEqual(await listRuns(run.cwd), ['cli-gated.checkpoint.json', 'cli-gated.review.md']);
+  const review = await readFile(path.join(run.cwd, 'runs', 'cli-gated.review.md'), 'utf8');
+  assert.match(review, /^# Review: cli-gated stopped before "publish" \(constant\)\n/);
+  assert.match(review, /## Input "seed" \(output of step "seed"\)\n\n```\nok\n```\n/);
+  const dry = await cli(['--pipeline', fixture('gated'), '--dry-run'], run.cwd);
+  assert.match(dry.stdout, /^dry run cli-gated: 3 steps, 1 skipped \(done in runs\/cli-gated\.checkpoint\.json\); stops at the first gate without --approve; /);
+  assert.match(dry.stdout, /2\. publish  gate  /);
+  const again = await cli(['--pipeline', fixture('gated'), '--approve'], run.cwd);
+  assert.equal(again.code, 0, again.stderr);
+  assert.match(again.stderr, /info step .* step=seed uses=constant status=resumed/);
+  assert.match(again.stderr, /info gate approved .* step=publish/);
+  assert.match(again.stdout, /^run \S+ ok: cli-gated, 3 steps \(1 resumed\)\n$/);
+  assert.deepEqual(await listRuns(run.cwd), [], 'the checkpoint and the review file are both gone');
+});
+
 // --- the LLM slot, end to end --------------------------------------------------------------------------------------
 
 test('AWK_LLM=mock runs an LLM step green on the mock: mode line, llm line and real in=/out= on the step line', async () => {

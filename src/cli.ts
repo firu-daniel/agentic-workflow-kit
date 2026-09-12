@@ -4,8 +4,9 @@
 // process; everything here is importable so the tests can drive the pieces without spawning one.
 // Exit codes: 0 a completed run, a dry run or --help; 1 a step failed after its retries (the step id is in the
 // message) or the run threw; 2 a usage error (an unknown flag, an AWK_LLM value that is not a mode, or
-// AWK_LLM=claude-code with no claude on PATH), or a pipeline
-// file that cannot be found, cannot be loaded, or lacks a required field (the path and the field are named). Log lines go to stderr; the plan and the summary to stdout.
+// AWK_LLM=claude-code with no claude on PATH), or a pipeline file that cannot be found, cannot be loaded, or lacks a
+// required field (the path and the field are named); 3 the run stopped at a gate (the review file is named; re-run
+// with --approve). Log lines go to stderr; the plan and the summary to stdout.
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -20,7 +21,8 @@ export const USAGE = `Usage: npm run start -- --pipeline <name> [--dry-run] [--a
   --pipeline <name>  runs pipelines/<name>.ts; a value containing "/" is a path to a pipeline file, resolved
                      against the cwd (under npm run start: the package root, where runs/ lands too)
   --dry-run          print what a run would do with each step, given the checkpoint, and call none
-  --approve          let gated steps run (gates are parsed but not enforced yet; that lands with the approval gate)
+  --approve          let gated steps run; without it the run stops before the first gated step, writes
+                     runs/<name>.review.md (what the step would do and consume) and exits 3
   --fresh            delete the pipeline's checkpoint first, so every step runs again
   --help, -h         this text
 
@@ -38,7 +40,8 @@ elsewhere (default https://api.github.com).
 
 Exit code 0: the run completed, or --dry-run / --help. 1: a step failed after its retries (the step id is in the
 message). 2: a usage error (an unknown flag, an AWK_LLM value that is not a mode, or AWK_LLM=claude-code with no claude
-on PATH), or a pipeline file that cannot be found or loaded, or lacks a required field.
+on PATH), or a pipeline file that cannot be found or loaded, or lacks a required field. 3: the run stopped at a gate;
+the checkpoint is kept, so the same command with --approve resumes and runs the gated step.
 Log lines go to stderr; the dry-run plan and the final summary go to stdout.
 `;
 
@@ -187,7 +190,12 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
   if (result.plan) return 0;
   if (!result.ok) {
-    // A run can also stop without a failed step (a gate that was not approved); the failed record only shapes the message.
+    const gated = result.records.find((r) => r.status === 'gated');
+    if (gated) {
+      // Not a failure: the run is waiting for a person. The summary goes to stdout like a completed run's.
+      process.stdout.write(`run ${result.runId} gated: ${pipeline.name} stopped before step "${gated.id}" (${gated.uses}); review ${gated.artifact}, then re-run with --approve\n`);
+      return 3;
+    }
     const failed = result.records.find((r) => r.status === 'failed');
     if (!failed) {
       process.stderr.write(`error: run ${result.runId} stopped: ${pipeline.name} did not complete\n`);

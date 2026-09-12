@@ -560,15 +560,15 @@ test('--dry-run returns the plan, prints it, calls no step and creates nothing u
   assert.deepEqual(calls, { seed: 0, flaky: 0 });
   assert.deepEqual(result.plan, [
     { id: 'seed', uses: 'constant', params: { value: 'hi' }, verify: { step: false, rules: 0 }, retry: DEFAULT_RETRY, gate: false, action: 'run' },
-    { id: 'again', uses: 'flaky', params: {}, verify: { step: false, rules: 1 }, retry: { attempts: 2, baseDelayMs: 5 }, gate: true, action: 'run' },
+    { id: 'again', uses: 'flaky', params: {}, verify: { step: false, rules: 1 }, retry: { attempts: 2, baseDelayMs: 5 }, gate: true, action: 'gate' },
     { id: 'shout', uses: 'upper', params: { from: 'seed', note: 'x'.repeat(100) }, verify: { step: true, rules: 2 }, retry: DEFAULT_RETRY, gate: false, action: 'run' },
     { id: 'loop', uses: 'constant', params: circular, verify: { step: false, rules: 0 }, retry: DEFAULT_RETRY, gate: false, action: 'run' },
   ]);
   assert.equal(await exists(absentRunsDir), false, 'a dry run creates nothing under runs/');
   assert.deepEqual(out.slice(0, 3), [
-    'dry run dry: 4 steps, no checkpoint; no step is called; retry backoff applies after a thrown error only',
+    'dry run dry: 4 steps, no checkpoint; stops at the first gate without --approve; no step is called; retry backoff applies after a thrown error only',
     '  1. seed   run   uses=constant verify=none retry=3x1000ms params={"value":"hi"}',
-    '  2. again  run   uses=flaky verify=1 rule retry=2x5ms gate params={}',
+    '  2. again  gate  uses=flaky verify=1 rule retry=2x5ms gate params={}',
   ]);
   assert.match(out[3], /^ {2}3\. shout {2}run {3}uses=upper verify=step\.verify\+2 rules retry=3x1000ms params=\{"from":"seed","note":"x{56}…$/);
   assert.equal(out[4], '  4. loop   run   uses=constant verify=none retry=3x1000ms params=[unprintable]');
@@ -602,4 +602,182 @@ test('--dry-run marks checkpointed steps as skipped and leaves the checkpoint un
   assert.equal(outFresh[0], 'dry run dry-resume: 2 steps, checkpoint ignored (--fresh); no step is called; retry backoff applies after a thrown error only');
   assert.equal(await readFile(file, 'utf8'), before, 'a dry run never deletes or rewrites the checkpoint');
   assert.deepEqual(calls, { seed: 1, flaky: 1 });
+});
+
+// --- the approval gate ---------------------------------------------------------------------------------------------
+
+const reviewFile = (pipeline: string): string => path.join(runsDir, `${pipeline}.review.md`);
+
+test('a gated step stops the run without --approve: gated record, review file, checkpoint kept, step not called', async () => {
+  const { calls, seed, flaky } = counting();
+  const pipeline: Pipeline = {
+    name: 'gated',
+    steps: [
+      { id: 'seed', uses: seed, params: { value: 'hi' } },
+      { id: 'again', uses: flaky, params: { from: 'seed' }, gate: true },
+      { id: 'tail', uses: constant, params: { value: 'never' } },
+    ],
+  };
+  const lines: string[] = [];
+
+  const result = await runPipeline(pipeline, { ...options(lines), runId: 'r30' });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(calls, { seed: 1, flaky: 0 });
+  assert.equal(result.records.length, 2);
+  assert.deepEqual(result.records[1], {
+    id: 'again', uses: 'flaky', status: 'gated', attempts: 0, durationMs: 0, usage: { input: 0, output: 0 }, artifact: reviewFile('gated'),
+  });
+  assert.ok(lines.some((l) => l.includes(` warn run gated run=r30 step=again uses=flaky review=${reviewFile('gated')}`)), lines.join('\n'));
+  assert.ok(!lines.some((l) => l.includes('run done') || l.includes('run failed') || l.includes('gate approved')));
+  const checkpoint = JSON.parse(await readFile(checkpointFile('gated'), 'utf8'));
+  assert.deepEqual(Object.keys(checkpoint.completed), ['seed'], 'the checkpoint holds the completed steps only');
+  const review = await readFile(reviewFile('gated'), 'utf8');
+  assert.match(review, /^# Review: gated stopped before "again" \(flaky\)\n/);
+  assert.match(review, /Run r30, \d{4}-\d{2}-\d{2}T[^.]+\.\d{3}Z\.\n\nStep `again` is marked `gate: true`/);
+  assert.match(review, /The 1 completed step is in the checkpoint/);
+  assert.match(review, /\n {4}npm run start -- --pipeline gated --approve\n/);
+  assert.match(review, /## Step "again" would run with\n\n```json\n\{\n {2}"from": "seed"\n\}\n```\n/);
+  assert.match(review, /## Input "seed" \(output of step "seed"\)\n\n```\nhi\n```\n/);
+  assert.match(review, /## Completed steps\n\n\| # \| step \| uses \| status \| attempts \| ms \| tokens in\/out \| artifact \|\n\|---.*\n\| 1 \| seed \| constant \| done \| 1 \| \d+ \| 0\/0 \|  \|\n$/);
+});
+
+test('--approve after a gate stop resumes the completed steps, runs the gated step first and clears checkpoint and review', async () => {
+  const { calls, seed, flaky } = counting();
+  const pipeline: Pipeline = {
+    name: 'gated-approve',
+    steps: [
+      { id: 'seed', uses: seed, params: { value: 'hi' } },
+      { id: 'again', uses: flaky, params: {}, retry: { attempts: 2, baseDelayMs: 1 }, gate: true },
+    ],
+  };
+  const stopped = await runPipeline(pipeline, { ...options(), runId: 'r31a' });
+  assert.equal(stopped.ok, false);
+  assert.equal(await exists(reviewFile('gated-approve')), true);
+
+  const lines: string[] = [];
+  const approved = await runPipeline(pipeline, { ...options(lines), flags: { dryRun: false, approve: true, fresh: false }, runId: 'r31b' });
+
+  assert.equal(approved.ok, true, lines.join('\n'));
+  assert.deepEqual(approved.records.map((r) => [r.id, r.status, r.attempts]), [['seed', 'resumed', 0], ['again', 'done', 2]]);
+  assert.deepEqual(calls, { seed: 1, flaky: 2 }, 'seed is not run again; the gated step runs (and retries) under --approve');
+  assert.ok(lines.some((l) => l.includes(' info gate approved run=r31b step=again')), lines.join('\n'));
+  assert.equal(await exists(checkpointFile('gated-approve')), false);
+  assert.equal(await exists(reviewFile('gated-approve')), false, 'a completed run removes the review file with the checkpoint');
+});
+
+test('--approve on a first run passes the gate without stopping, and --fresh removes a left-over review file', async () => {
+  let failuresLeft = 2;
+  const flaky: Step<Record<string, never>, string> = {
+    name: 'flaky',
+    async run() {
+      if (failuresLeft-- > 0) throw new Error('not yet');
+      return { output: 'ok' };
+    },
+  };
+  const { calls, seed } = counting();
+  const pipeline: Pipeline = {
+    name: 'gated-fresh',
+    steps: [
+      { id: 'seed', uses: seed, params: { value: 'hi' } },
+      { id: 'again', uses: flaky, params: {}, retry: { attempts: 1 }, gate: true },
+    ],
+  };
+  const lines: string[] = [];
+  const first = await runPipeline(pipeline, { ...options(lines), flags: { dryRun: false, approve: true, fresh: false }, runId: 'r32a' });
+  assert.deepEqual(first.records.map((r) => r.status), ['done', 'failed'], 'the gate let flaky run; it failed its single attempt');
+  assert.ok(lines.some((l) => l.includes(' info gate approved run=r32a step=again')));
+  assert.ok(!lines.some((l) => l.includes('run gated')));
+  assert.equal(await exists(reviewFile('gated-fresh')), false);
+
+  const gated = await runPipeline(pipeline, { ...options(), flags: { dryRun: false, approve: false, fresh: true }, runId: 'r32b' });
+  assert.deepEqual(gated.records.map((r) => r.status), ['done', 'gated']);
+  assert.equal(calls.seed, 2, '--fresh ran seed again before reaching the gate');
+  assert.equal(await exists(reviewFile('gated-fresh')), true);
+
+  const dry: string[] = [];
+  await runPipeline(pipeline, { ...dryOptions(dry), runId: 'r32c' });
+  assert.match(dry[0], /^dry run gated-fresh: 2 steps, 1 skipped .*; stops at the first gate without --approve; /);
+  assert.match(dry[2], /^ {2}2\. again  gate  /);
+  const dryApproved: string[] = [];
+  await runPipeline(pipeline, { ...dryOptions(dryApproved), flags: { dryRun: true, approve: true, fresh: false }, runId: 'r32d' });
+  assert.doesNotMatch(dryApproved[0], /stops at the first gate/);
+  assert.match(dryApproved[2], /^ {2}2\. again  run {3}uses=flaky .* gate params=/, 'the gate marker stays; the action is run');
+  assert.equal(await exists(reviewFile('gated-fresh')), true, 'a dry run leaves the review file alone');
+
+  const fresh = await runPipeline(pipeline, { ...options(), flags: { dryRun: false, approve: true, fresh: true }, runId: 'r32e' });
+  assert.deepEqual(fresh.records.map((r) => r.status), ['done', 'failed'], 'the second failure: the run did not complete');
+  assert.equal(await exists(reviewFile('gated-fresh')), false, '--fresh removed the review file before the run, not the completion cleanup');
+  assert.equal(await exists(checkpointFile('gated-fresh')), true, 'the failed run left its checkpoint as usual');
+});
+
+test('an approved re-run drops the review file before it can go stale, even when a later step fails', async () => {
+  const boom: Step<Record<string, never>, string> = {
+    name: 'boom',
+    async run() {
+      throw new Error('tail failed');
+    },
+  };
+  const pipeline: Pipeline = {
+    name: 'gated-stale',
+    steps: [
+      { id: 'seed', uses: constant, params: { value: 'hi' } },
+      { id: 'publish', uses: constant, params: { value: 'published' }, gate: true },
+      { id: 'tail', uses: boom, params: {}, retry: { attempts: 1 } },
+    ],
+  };
+  const stopped = await runPipeline(pipeline, { ...options(), runId: 'r33a' });
+  assert.equal(stopped.ok, false);
+  assert.equal(await exists(reviewFile('gated-stale')), true);
+
+  const approved = await runPipeline(pipeline, { ...options(), flags: { dryRun: false, approve: true, fresh: false }, runId: 'r33b' });
+
+  assert.equal(approved.ok, false);
+  assert.deepEqual(approved.records.map((r) => r.status), ['resumed', 'done', 'failed']);
+  assert.equal(await exists(checkpointFile('gated-stale')), true, 'the failed run keeps its checkpoint as usual');
+  assert.equal(await exists(reviewFile('gated-stale')), false, 'the approved gate removed the review that asked for the approval');
+});
+
+test('a gate on the first step creates the runs directory, and its review claims no checkpoint and lists no step', async () => {
+  const absentRunsDir = path.join(runsDir, 'absent-gate');
+  const pipeline: Pipeline = {
+    name: 'first-gate',
+    steps: [{ id: 'publish', uses: constant, params: { value: 'published' }, gate: true }],
+  };
+
+  const result = await runPipeline(pipeline, { ...options(), runsDir: absentRunsDir, runId: 'r34' });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.records.map((r) => r.status), ['gated']);
+  const file = path.join(absentRunsDir, 'first-gate.review.md');
+  assert.equal(result.records[0].artifact, file);
+  const review = await readFile(file, 'utf8');
+  assert.match(review, /\nNo step has completed yet; nothing is in the checkpoint\.\n/);
+  assert.doesNotMatch(review, /## Completed steps/);
+  assert.doesNotMatch(review, /## Input /);
+  assert.equal(await exists(path.join(absentRunsDir, 'first-gate.checkpoint.json')), false, 'no step completed, so nothing was saved');
+});
+
+test('a gate whose params JSON cannot serialize still stops the run: the review renders them as [unprintable]', async () => {
+  const circular: { value: string; self?: unknown } = { value: 'published' };
+  circular.self = circular; // params are never JSON round-tripped on the run path; the review must not be the exception
+  const pipeline: Pipeline = {
+    name: 'gated-circular',
+    steps: [
+      { id: 'seed', uses: constant, params: { value: 'hi' } },
+      { id: 'publish', uses: constant, params: circular, gate: true },
+    ],
+  };
+  const lines: string[] = [];
+
+  const result = await runPipeline(pipeline, { ...options(lines), runId: 'r35' });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.records[1], {
+    id: 'publish', uses: 'constant', status: 'gated', attempts: 0, durationMs: 0, usage: { input: 0, output: 0 }, artifact: reviewFile('gated-circular'),
+  });
+  assert.ok(lines.some((l) => l.includes(` warn run gated run=r35 step=publish uses=constant review=${reviewFile('gated-circular')}`)), lines.join('\n'));
+  const review = await readFile(reviewFile('gated-circular'), 'utf8');
+  assert.match(review, /## Step "publish" would run with\n\n```json\n\[unprintable\]\n```\n/);
+  assert.match(review, /## Input "seed" \(output of step "seed"\)\n\n```\nhi\n```\n/);
 });

@@ -11,9 +11,11 @@ export interface TokenUsage {
 /** CLI flags, resolved once per run and visible to every step. */
 export interface RunFlags {
   /** Print the execution plan (what a run would do with each step now, given the checkpoint) and return without
-   * calling a step or touching runs/. With --fresh the plan shows every step running; the checkpoint stays. */
+   * calling a step or touching runs/. With --fresh nothing is skipped: every step not gated shows `run`, a gated one
+   * `gate` unless --approve is passed. The checkpoint stays. */
   dryRun: boolean;
-  /** Let gated steps run (see PipelineStep.gate). Parsed and passed through; not enforced until the approval gate lands. */
+  /** Let gated steps run (see PipelineStep.gate). Without it the run stops before the first gated step not yet
+   * completed, writes `runs/<pipeline>.review.md` and returns `ok: false` with a `gated` record. */
   approve: boolean;
   /** Delete the pipeline's checkpoint before starting, so every step runs again. */
   fresh: boolean;
@@ -120,8 +122,9 @@ export interface PipelineStep<TParams = unknown, TOutput = unknown> {
   verify?: VerifyRule<TOutput>[];
   /** Overrides DEFAULT_RETRY for this step, field by field. */
   retry?: Partial<RetryPolicy>;
-  /** Human-in-the-loop gate: the runner is to stop before this step unless --approve is passed. Not enforced yet — the
-   * approval gate reads it; today it only shows in the --dry-run plan. */
+  /** Human-in-the-loop gate: the runner stops before this step unless --approve is passed, writing what the step would
+   * do and consume to `runs/<pipeline>.review.md` (src/review.ts) and keeping the checkpoint, so the --approve re-run
+   * resumes the completed steps and runs this one first. Shown as `gate` in the --dry-run plan. */
   gate?: boolean;
 }
 
@@ -161,7 +164,9 @@ export interface Checkpoint {
 
 /** Per-step outcome kept by the runner; the run report renders one line per record.
  * `attempts` counts every attempt made; `durationMs` and `usage` are summed across them (backoff waits excluded);
- * `error` is the last attempt's. `resumed` = output taken from the checkpoint, not run: attempts 0, zero duration and tokens. */
+ * `error` is the last attempt's. `resumed` = output taken from the checkpoint, not run: attempts 0, zero duration and
+ * tokens. `gated` = the run stopped before this step for want of --approve: attempts 0, zero duration and tokens,
+ * `artifact` = the review file; it is always the last record of a run with `ok: false` and no `failed` record. */
 export type StepStatus = 'done' | 'failed' | 'resumed' | 'gated';
 
 export interface StepRecord {
@@ -194,6 +199,7 @@ export interface PlanEntry {
   /** Resolved against DEFAULT_RETRY. */
   retry: RetryPolicy;
   gate: boolean;
-  /** `skip` when the checkpoint already holds this step's output. */
-  action: 'run' | 'skip';
+  /** `skip` when the checkpoint already holds this step's output; `gate` when the step is gated and --approve is not
+   * passed (a real run would stop there; the entries after it show what it would do once approved). */
+  action: 'run' | 'skip' | 'gate';
 }

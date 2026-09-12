@@ -38,5 +38,17 @@ export function toText(value: unknown): string {
   }
 }
 
+/** The same policy over more than one line, for a rendered document: a string as it is, anything else as indented
+ * JSON, `String(value)` for what JSON drops and `[unprintable]` for what it cannot render. The review file
+ * (src/review.ts) and a step's prompt (src/steps/shared.ts, as `asText`) both render a value this way. */
+export function prettyText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return '[unprintable]';
+  }
+}
+
 /** The message of an Error, or the String of anything else thrown. */
 export const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));

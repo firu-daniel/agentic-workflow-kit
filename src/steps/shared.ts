@@ -1,6 +1,7 @@
 // Helpers the LLM-backed steps (extract, plan, draft) share: reading the inputs a step names, rendering them into a
 // prompt, turning the previous attempt's failures into a correction paragraph so a retry fixes the answer instead
 // of repeating it, and refusing an answer the output cap cut short.
+import { prettyText } from '../log.js';
 import { NonRetryableError } from '../types.js';
 import type { StepContext } from '../types.js';
 
@@ -28,7 +29,10 @@ export function renderInputs(inputs: { id: string; value: unknown }[], maxChars 
   return inputs.map(({ id, value }) => `### input "${id}"\n${clip(asText(value), maxChars)}`).join('\n\n');
 }
 
-export const asText = (value: unknown): string => (typeof value === 'string' ? value : JSON.stringify(value, null, 2) ?? String(value));
+/** The core's guarded pretty-printer (src/log.ts) under the name the steps use: a string as it is, anything else as
+ * pretty JSON, `[unprintable]` for a value JSON cannot render. One implementation, so a prompt and the approval
+ * gate's review file show the same value the same way. */
+export const asText = prettyText;
 
 export const clip = (text: string, maxChars: number): string =>
   text.length <= maxChars ? text : `${text.slice(0, maxChars)}\n[… cut at ${maxChars} characters]`;

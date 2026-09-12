@@ -1,10 +1,12 @@
 // The runner core: executes a pipeline's steps in order, passes each output forward by step id, verifies every
 // output (the step's own rules, then the pipeline's) and keeps one StepRecord per step; each attempt is one log line.
 // A checkpoint (src/checkpoint.ts) lets a re-run resume at the first step not completed. A failed attempt is retried
-// up to the step's retry policy with the previous failures handed to the next attempt; a thrown error backs off first,
-// a verify failure retries at once. --dry-run prints what a run would do with each step and calls none.
+// up to the step's retry policy with the previous failures handed to the next attempt; a thrown error backs off first, a
+// verify failure retries at once. A `gate: true` step stops the run before it unless --approve is passed (src/review.ts
+// writes what it would do). --dry-run prints what a run would do with each step and calls none.
 import { checkpointStore } from './checkpoint.js';
 import { createLogger, errorText, stdoutWriter, toText, type LineWriter } from './log.js';
+import { stopAtGate } from './review.js';
 import { DEFAULT_RETRY, NonRetryableError } from './types.js';
 import type {
   Checkpoint, Logger, LlmClient, Pipeline, PipelineStep, PlanEntry, RetryPolicy, RunFlags, RunResult, StepContext, StepRecord, TokenUsage,
@@ -61,7 +63,7 @@ export async function runPipeline(pipeline: Pipeline, options: RunnerOptions): P
       verify: { step: typeof ps.uses.verify === 'function', rules: ps.verify?.length ?? 0 },
       retry: policy(ps),
       gate: ps.gate === true,
-      action: completed[ps.id] ? 'skip' : 'run',
+      action: completed[ps.id] ? 'skip' : ps.gate && !options.flags.approve ? 'gate' : 'run',
     }));
     for (const line of formatPlan(pipeline.name, plan, store.file, options.flags.fresh)) (options.out ?? stdoutWriter)(line);
     return { ...result(true), plan };
@@ -70,13 +72,16 @@ export async function runPipeline(pipeline: Pipeline, options: RunnerOptions): P
   for (const ps of pipeline.steps) {
     const prior = completed[ps.id];
     if (prior) {
-      const record: StepRecord = { id: ps.id, uses: ps.uses.name, status: 'resumed', attempts: 0, durationMs: 0, usage: { ...NO_TOKENS } };
-      if (prior.artifact) record.artifact = prior.artifact;
-      records.push(record);
+      records.push({ id: ps.id, uses: ps.uses.name, status: 'resumed', attempts: 0, durationMs: 0, usage: { ...NO_TOKENS }, ...(prior.artifact ? { artifact: prior.artifact } : {}) });
       log.info('step', { run: runId, step: ps.id, uses: ps.uses.name, status: 'resumed' });
       inputs[ps.id] = prior.output;
       continue;
     }
+    if (ps.gate && !options.flags.approve) {
+      records.push(await stopAtGate(store.dir, pipeline, ps, records, inputs, runId, log));
+      return result(false);
+    }
+    if (ps.gate) { log.info('gate approved', { run: runId, step: ps.id }); await store.clearReview(); }
     const ctx: StepContext = {
       runId, stepId: ps.id, params: ps.params, inputs, llm: options.llm, flags: options.flags, log, attempt: 1, previousFailures: [],
     };
@@ -100,7 +105,8 @@ function formatPlan(name: string, plan: PlanEntry[], file: string, fresh: boolea
   const skipped = plan.filter((e) => e.action === 'skip').length;
   const width = Math.max(0, ...plan.map((e) => e.id.length));
   const checkpoint = skipped ? `${skipped} skipped (done in ${file})` : fresh ? 'checkpoint ignored (--fresh)' : 'no checkpoint';
-  const header = `dry run ${name}: ${plan.length} steps, ${checkpoint}; no step is called; retry backoff applies after a thrown error only`;
+  const gate = plan.some((e) => e.action === 'gate') ? '; stops at the first gate without --approve' : '';
+  const header = `dry run ${name}: ${plan.length} steps, ${checkpoint}${gate}; no step is called; retry backoff applies after a thrown error only`;
   return [header, ...plan.map((e, i) => {
     const rules = e.verify.rules ? `${e.verify.rules} rule${e.verify.rules === 1 ? '' : 's'}` : '';
     const verify = [e.verify.step ? 'step.verify' : '', rules].filter(Boolean).join('+') || 'none';
