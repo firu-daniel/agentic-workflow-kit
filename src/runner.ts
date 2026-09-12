@@ -3,11 +3,14 @@
 // A checkpoint (src/checkpoint.ts) lets a re-run resume at the first step not completed. A failed attempt is retried
 // up to the step's retry policy with the previous failures handed to the next attempt; a thrown error backs off first, a
 // verify failure retries at once. A `gate: true` step stops the run before it unless --approve is passed (src/review.ts
-// writes what it would do). --dry-run prints what a run would do with each step and calls none.
+// writes what it would do). --dry-run prints what a run would do with each step and calls none. Every other run ends
+// by writing its report, `runs/<run id>.md` (src/report.ts), whatever the outcome — a throw out of the loop included,
+// reported and then rethrown; only a dry run writes none.
 import { checkpointStore } from './checkpoint.js';
 import { createLogger, errorText, stdoutWriter, toText, type LineWriter } from './log.js';
+import { writeReport } from './report.js';
 import { stopAtGate } from './review.js';
-import { DEFAULT_RETRY, NonRetryableError } from './types.js';
+import { DEFAULT_RETRY, FILE_NAME, NonRetryableError } from './types.js';
 import type {
   Checkpoint, Logger, LlmClient, Pipeline, PipelineStep, PlanEntry, RetryPolicy, RunFlags, RunResult, StepContext, StepRecord, TokenUsage,
 } from './types.js';
@@ -19,9 +22,9 @@ export interface RunnerOptions {
   log?: Logger;
   /** Where --dry-run prints the plan. Defaults to stdout. */
   out?: LineWriter;
-  /** Defaults to a timestamp. */
+  /** Defaults to the start time, so the report lands at `runs/<timestamp>.md`. Must match FILE_NAME: it is a file name. */
   runId?: string;
-  /** Directory of the per-pipeline checkpoint file. Defaults to `runs`. */
+  /** Directory of the per-pipeline checkpoint and review files and of the per-run report. Defaults to `runs`. */
   runsDir?: string;
   /** Waits before a retry attempt. Defaults to setTimeout; tests inject a recorder. */
   sleep?: Sleep;
@@ -30,29 +33,28 @@ export interface RunnerOptions {
 export type Sleep = (ms: number) => Promise<void>;
 const NO_TOKENS: TokenUsage = { input: 0, output: 0 };
 const realSleep: Sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const policy = (ps: PipelineStep): RetryPolicy => ({
-  attempts: ps.retry?.attempts ?? DEFAULT_RETRY.attempts,
-  baseDelayMs: ps.retry?.baseDelayMs ?? DEFAULT_RETRY.baseDelayMs,
-});
+const policy = (ps: PipelineStep): RetryPolicy =>
+  ({ attempts: ps.retry?.attempts ?? DEFAULT_RETRY.attempts, baseDelayMs: ps.retry?.baseDelayMs ?? DEFAULT_RETRY.baseDelayMs });
 
 /** Runs the pipeline to completion or to the first step that fails. Never throws for a step failure. */
 export async function runPipeline(pipeline: Pipeline, options: RunnerOptions): Promise<RunResult> {
-  const runId = options.runId ?? new Date().toISOString().replace(/[:.]/g, '-');
+  const started = new Date(), runId = options.runId ?? started.toISOString().replace(/[:.]/g, '-');
   const log = options.log ?? createLogger();
   const sleep = options.sleep ?? realSleep;
   const inputs: Record<string, unknown> = {};
   const records: StepRecord[] = [];
-  const result = (ok: boolean): RunResult => ({ runId, pipeline: pipeline.name, ok, records });
+  const result = (ok: boolean, error?: string): RunResult => ({ runId, pipeline: pipeline.name, ok, records, ...(error ? { error } : {}) });
 
   const duplicate = pipeline.steps.find((s, i) => pipeline.steps.findIndex((o) => o.id === s.id) !== i);
   if (duplicate) throw new Error(`pipeline "${pipeline.name}": duplicate step id "${duplicate.id}"`);
+  if (options.runId !== undefined && !FILE_NAME.test(options.runId)) throw new Error(`runId "${options.runId}" is not file-name-safe`);
 
   const store = checkpointStore(options.runsDir ?? 'runs', pipeline, log);
+  // Every non-dry-run return, a throw included, goes through here: the report is written before the result comes back.
+  const finish = (ok: boolean, error?: string): Promise<RunResult> => writeReport(store.dir, result(ok, error), started, options.flags, log);
   const completed: Checkpoint['completed'] = options.flags.fresh ? Object.create(null) : await store.load();
 
-  log.info('run start', {
-    run: runId, pipeline: pipeline.name, steps: pipeline.steps.length, resumed: Object.keys(completed).length,
-  });
+  log.info('run start', { run: runId, pipeline: pipeline.name, steps: pipeline.steps.length, resumed: Object.keys(completed).length });
   // Nothing above writes to the file system: --dry-run returns here, --fresh deletes before the first write.
   if (options.flags.dryRun) {
     // What a real run would do with each step right now, given the loaded checkpoint.
@@ -68,36 +70,40 @@ export async function runPipeline(pipeline: Pipeline, options: RunnerOptions): P
     for (const line of formatPlan(pipeline.name, plan, store.file, options.flags.fresh)) (options.out ?? stdoutWriter)(line);
     return { ...result(true), plan };
   }
-  if (options.flags.fresh) await store.clear();
-  for (const ps of pipeline.steps) {
-    const prior = completed[ps.id];
-    if (prior) {
-      records.push({ id: ps.id, uses: ps.uses.name, status: 'resumed', attempts: 0, durationMs: 0, usage: { ...NO_TOKENS }, ...(prior.artifact ? { artifact: prior.artifact } : {}) });
-      log.info('step', { run: runId, step: ps.id, uses: ps.uses.name, status: 'resumed' });
-      inputs[ps.id] = prior.output;
-      continue;
+  try {
+    if (options.flags.fresh) await store.clear();
+    for (const ps of pipeline.steps) {
+      const prior = completed[ps.id];
+      if (prior) {
+        records.push({ id: ps.id, uses: ps.uses.name, status: 'resumed', attempts: 0, durationMs: 0, usage: { ...NO_TOKENS }, ...(prior.artifact ? { artifact: prior.artifact } : {}) });
+        log.info('step', { run: runId, step: ps.id, uses: ps.uses.name, status: 'resumed' });
+        inputs[ps.id] = prior.output;
+        continue;
+      }
+      if (ps.gate && !options.flags.approve) {
+        records.push(await stopAtGate(store.dir, pipeline, ps, records, inputs, runId, log));
+        return finish(false);
+      }
+      if (ps.gate) { log.info('gate approved', { run: runId, step: ps.id }); await store.clearReview(); }
+      const ctx: StepContext =
+        { runId, stepId: ps.id, params: ps.params, inputs, llm: options.llm, flags: options.flags, log, attempt: 1, previousFailures: [] };
+      const { record, output } = await retryStep(ps, ctx, sleep);
+      records.push(record);
+      if (record.status === 'failed') {
+        log.error('run failed', { run: runId, step: ps.id, attempts: record.attempts, error: record.error });
+        return finish(false);
+      }
+      inputs[ps.id] = output;
+      completed[ps.id] = record.artifact ? { output, artifact: record.artifact } : { output };
+      await store.save(completed);
     }
-    if (ps.gate && !options.flags.approve) {
-      records.push(await stopAtGate(store.dir, pipeline, ps, records, inputs, runId, log));
-      return result(false);
-    }
-    if (ps.gate) { log.info('gate approved', { run: runId, step: ps.id }); await store.clearReview(); }
-    const ctx: StepContext = {
-      runId, stepId: ps.id, params: ps.params, inputs, llm: options.llm, flags: options.flags, log, attempt: 1, previousFailures: [],
-    };
-    const { record, output } = await retryStep(ps, ctx, sleep);
-    records.push(record);
-    if (record.status === 'failed') {
-      log.error('run failed', { run: runId, step: ps.id, attempts: record.attempts, error: record.error });
-      return result(false);
-    }
-    inputs[ps.id] = output;
-    completed[ps.id] = record.artifact ? { output, artifact: record.artifact } : { output };
-    await store.save(completed);
+    await store.clear();
+  } catch (err) { // not a step failure (those are records): an output the checkpoint cannot serialize, a store error
+    await finish(false, errorText(err));
+    throw err;
   }
-  await store.clear();
   log.info('run done', { run: runId, pipeline: pipeline.name, steps: records.length });
-  return result(true);
+  return finish(true);
 }
 
 /** One header line plus one line per step, params as JSON cut at 80 chars. Reads as a plan, not as log lines. */
@@ -153,14 +159,8 @@ async function retryStep(ps: PipelineStep, ctx: StepContext, sleep: Sleep): Prom
 /** One attempt of one step: run, then verify (step's own rules first, pipeline rules after). */
 async function attemptStep(ps: PipelineStep, ctx: StepContext): Promise<Attempt> {
   const started = Date.now();
-  const record: StepRecord = {
-    id: ps.id,
-    uses: ps.uses.name,
-    status: 'done',
-    attempts: ctx.attempt,
-    durationMs: 0,
-    usage: { ...NO_TOKENS },
-  };
+  const record: StepRecord =
+    { id: ps.id, uses: ps.uses.name, status: 'done', attempts: ctx.attempt, durationMs: 0, usage: { ...NO_TOKENS } };
   let output: unknown;
   let failures: string[];
   let retryable = true;

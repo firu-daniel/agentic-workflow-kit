@@ -1,5 +1,7 @@
 // The structured key=value logger used by the runner, the CLI (src/cli.ts) and any client that needs a `Logger`.
-// Steps receive it through `ctx.log`.
+// Steps receive it through `ctx.log`. It also holds the value-rendering helpers the other modules share: `toText`
+// and `prettyText` for a value of any shape, `errorText` for a thrown one, and `cell` / `clip` for the markdown the
+// review file (src/review.ts) and the run report (src/report.ts) write.
 import type { Logger } from './types.js';
 
 export type LineWriter = (line: string) => void;
@@ -52,3 +54,12 @@ export function prettyText(value: unknown): string {
 
 /** The message of an Error, or the String of anything else thrown. */
 export const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/** One markdown table cell: a `|` would open a column and a newline would end the row, so both are escaped. A value
+ * that must stay on one line outside a table (the report's closing line) goes through it too. */
+export const cell = (value: string): string => value.replace(/\|/g, '\\|').replace(/\r?\n/g, '\\n');
+
+/** `text` cut to `max` characters, the cut marked on the same line so a clipped value still fits one cell or one
+ * line. The cap is the caller's: REVIEW_MAX_CHARS (src/review.ts), REPORT_CELL_CHARS / REPORT_ERROR_CHARS
+ * (src/report.ts). */
+export const clip = (text: string, max: number): string => (text.length <= max ? text : `${text.slice(0, max)}… [cut at ${max} characters]`);

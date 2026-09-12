@@ -14,6 +14,7 @@ import { parseArgs } from 'node:util';
 import { createLlm, LlmModeError } from './llm.js';
 import { createLogger, errorText } from './log.js';
 import { runPipeline } from './runner.js';
+import { FILE_NAME } from './types.js';
 import type { LlmClient, Pipeline, RunFlags, RunResult } from './types.js';
 
 export const USAGE = `Usage: npm run start -- --pipeline <name> [--dry-run] [--approve] [--fresh]
@@ -42,6 +43,9 @@ Exit code 0: the run completed, or --dry-run / --help. 1: a step failed after it
 message). 2: a usage error (an unknown flag, an AWK_LLM value that is not a mode, or AWK_LLM=claude-code with no claude
 on PATH), or a pipeline file that cannot be found or loaded, or lacks a required field. 3: the run stopped at a gate;
 the checkpoint is kept, so the same command with --approve resumes and runs the gated step.
+Every run that is not a dry run writes its report to runs/<timestamp>.md — one line per step with status, attempts,
+duration, tokens, error and artifact, the totals and the final artifact — whatever the outcome, a run that threw
+included; only a dry run writes none. The summary names it, and the report stays after the checkpoint is cleared.
 Log lines go to stderr; the dry-run plan and the final summary go to stdout.
 `;
 
@@ -108,8 +112,6 @@ export async function loadPipeline(spec: string): Promise<{ file: string; pipeli
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-/** The name keys the checkpoint file (runs/<name>.checkpoint.json), so it must be a plain file name. */
-const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 function fail(file: string, field: string, expected: string): never {
   throw new PipelineError(`${file}: ${field} ${expected}`);
@@ -118,7 +120,8 @@ function fail(file: string, field: string, expected: string): never {
 /** Checks a default export against the Pipeline contract field by field; the first failure names the field. */
 export function checkPipeline(value: unknown, file: string): Pipeline {
   if (!isRecord(value)) fail(file, 'default export', 'must be the pipeline object: export default { name, steps }');
-  if (typeof value.name !== 'string' || !NAME.test(value.name)) {
+  // The name keys the checkpoint file (runs/<name>.checkpoint.json), so it must be a plain file name.
+  if (typeof value.name !== 'string' || !FILE_NAME.test(value.name)) {
     fail(file, 'name', 'must be a file-name-safe string (letters, digits, . _ -); it keys the checkpoint file');
   }
   if (!Array.isArray(value.steps)) fail(file, 'steps', 'must be an array of steps');
@@ -184,29 +187,32 @@ export async function main(argv: readonly string[]): Promise<number> {
   try {
     result = await runPipeline(pipeline, { flags: args.flags, llm, log });
   } catch (err) {
-    // The runner throws only outside a step: an unreadable checkpoint, or an output the checkpoint cannot serialize.
+    // The runner throws only outside a step: a bad option, an unreadable checkpoint, an output it cannot serialize.
+    // It reports the throw before rethrowing, so the file is named by the `run report` log line, not by this message.
     process.stderr.write(`error: pipeline "${pipeline.name}": ${errorText(err)}\n`);
     return 1;
   }
   if (result.plan) return 0;
+  // The report is the run's evidence, so every summary names it (a failed write leaves it unset and logs a warning).
+  const report = result.report ? `; report ${result.report}` : '';
   if (!result.ok) {
     const gated = result.records.find((r) => r.status === 'gated');
     if (gated) {
       // Not a failure: the run is waiting for a person. The summary goes to stdout like a completed run's.
-      process.stdout.write(`run ${result.runId} gated: ${pipeline.name} stopped before step "${gated.id}" (${gated.uses}); review ${gated.artifact}, then re-run with --approve\n`);
+      process.stdout.write(`run ${result.runId} gated: ${pipeline.name} stopped before step "${gated.id}" (${gated.uses}); review ${gated.artifact}, then re-run with --approve${report}\n`);
       return 3;
     }
     const failed = result.records.find((r) => r.status === 'failed');
     if (!failed) {
-      process.stderr.write(`error: run ${result.runId} stopped: ${pipeline.name} did not complete\n`);
+      process.stderr.write(`error: run ${result.runId} stopped: ${pipeline.name} did not complete${report}\n`);
       return 1;
     }
     const attempts = `${failed.attempts} attempt${failed.attempts === 1 ? '' : 's'}`;
-    process.stderr.write(`error: run ${result.runId} failed at step "${failed.id}" (${failed.uses}) after ${attempts}: ${failed.error}\n`);
+    process.stderr.write(`error: run ${result.runId} failed at step "${failed.id}" (${failed.uses}) after ${attempts}: ${failed.error}${report}\n`);
     return 1;
   }
   const count = result.records.length;
   const resumed = result.records.filter((r) => r.status === 'resumed').length;
-  process.stdout.write(`run ${result.runId} ok: ${pipeline.name}, ${count} step${count === 1 ? '' : 's'}${resumed ? ` (${resumed} resumed)` : ''}\n`);
+  process.stdout.write(`run ${result.runId} ok: ${pipeline.name}, ${count} step${count === 1 ? '' : 's'}${resumed ? ` (${resumed} resumed)` : ''}${report}\n`);
   return 0;
 }

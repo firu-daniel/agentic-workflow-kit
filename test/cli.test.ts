@@ -41,7 +41,14 @@ async function cli(
     });
   });
 }
-const listRuns = (cwd: string): Promise<string[]> => readdir(path.join(cwd, 'runs')).catch(() => ['<no runs dir>']);
+/** The runs/ listing, sorted, with every per-run report (`<timestamp>.md`) shown as `<report>`: one per run made in
+ * that cwd, since the runner never removes them. */
+const listRuns = (cwd: string): Promise<string[]> => readdir(path.join(cwd, 'runs'))
+  .then((names) => names.map((n) => (REPORT.test(n) ? '<report>' : n)).sort())
+  .catch(() => ['<no runs dir>']);
+const REPORT = /^\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d{3}Z\.md$/;
+/** The `; report runs/<timestamp>.md` tail every summary carries. */
+const REPORT_TAIL = String.raw`; report runs\/\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d{3}Z\.md`;
 
 // --- flags -------------------------------------------------------------------------------------------------------
 
@@ -156,13 +163,19 @@ test('an unknown pipeline and a malformed pipeline file exit 2 naming the path a
   assert.equal(malformed.stderr, `error: ${fixture('no-steps')}: steps must be an array of steps\n`);
 });
 
-test('`--pipeline smoke` runs green from any cwd: exit 0, one summary line on stdout, log on stderr, no checkpoint left', async () => {
+test('`--pipeline smoke` runs green from any cwd: exit 0, one summary line on stdout, log on stderr, no checkpoint left, the report kept and readable', async () => {
   const run = await cli(['--pipeline', 'smoke']);
   assert.equal(run.code, 0, run.stderr);
-  assert.match(run.stdout, /^run \S+ ok: smoke, 3 steps\n$/);
+  assert.match(run.stdout, new RegExp(`^run \\S+ ok: smoke, 3 steps${REPORT_TAIL}\\n$`));
   assert.match(run.stderr, /info step .* step=exclaim uses=exclaim status=done attempt=2/);
   assert.match(run.stderr, /info run done .* pipeline=smoke steps=3/);
-  assert.deepEqual(await listRuns(run.cwd), []);
+  assert.deepEqual(await listRuns(run.cwd), ['<report>'], 'no checkpoint left; the report stays');
+  const file = /report (runs\/\S+\.md)\n$/.exec(run.stdout)?.[1];
+  assert.ok(file, 'the summary names the report');
+  const report = await readFile(path.join(run.cwd, file), 'utf8');
+  assert.match(report, /^# Run \S+: smoke ok\n/);
+  assert.match(report, /\n\| 3 \| exclaim \| exclaim \| done \| 2 \| \d+ \| 0\/0 \|  \|  \|\n/, 'the retried step shows 2 attempts');
+  assert.match(report, /\nArtifact: none\n$/);
 });
 
 test('`--pipeline smoke --dry-run` prints the plan on stdout, exits 0 and creates nothing', async () => {
@@ -180,8 +193,8 @@ test('a failing step exits 1 naming the step; the checkpoint it leaves makes the
   const run = await cli(['--pipeline', fixture('failing')]);
   assert.equal(run.code, 1);
   assert.equal(run.stdout, '');
-  assert.match(run.stderr, /^error: run \S+ failed at step "boom" \(bomb\) after 1 attempt: the fuse was lit\n$/m);
-  assert.deepEqual(await listRuns(run.cwd), ['cli-failing.checkpoint.json']);
+  assert.match(run.stderr, new RegExp(`^error: run \\S+ failed at step "boom" \\(bomb\\) after 1 attempt: the fuse was lit${REPORT_TAIL}\\n$`, 'm'));
+  assert.deepEqual(await listRuns(run.cwd), ['<report>', 'cli-failing.checkpoint.json']);
   const dry = await cli(['--pipeline', fixture('failing'), '--dry-run'], run.cwd);
   assert.equal(dry.code, 0, dry.stderr);
   assert.match(dry.stdout, /^dry run cli-failing: 2 steps, 1 skipped \(done in runs\/cli-failing.checkpoint.json\)/);
@@ -189,28 +202,28 @@ test('a failing step exits 1 naming the step; the checkpoint it leaves makes the
   assert.match(dry.stdout, /2\. boom  run/);
   const fresh = await cli(['--pipeline', fixture('failing'), '--dry-run', '--fresh'], run.cwd);
   assert.match(fresh.stdout, /^dry run cli-failing: 2 steps, checkpoint ignored \(--fresh\)/);
-  assert.deepEqual(await listRuns(run.cwd), ['cli-failing.checkpoint.json']);
+  assert.deepEqual(await listRuns(run.cwd), ['<report>', 'cli-failing.checkpoint.json'], 'a dry run writes no report');
 });
 
 test('a re-run resumes the checkpointed step: status=resumed on stderr, the resumed count in the summary, runs/ cleared', async () => {
   const first = await cli(['--pipeline', fixture('resumable')]);
   assert.equal(first.code, 1);
   assert.match(first.stderr, /failed at step "flaky" \(flaky\) after 1 attempt: AWK_TEST_PASS is not set/);
-  assert.deepEqual(await listRuns(first.cwd), ['cli-resumable.checkpoint.json']);
+  assert.deepEqual(await listRuns(first.cwd), ['<report>', 'cli-resumable.checkpoint.json']);
   const again = await cli(['--pipeline', fixture('resumable')], first.cwd, { AWK_TEST_PASS: '1' });
   assert.equal(again.code, 0, again.stderr);
   assert.match(again.stderr, /info step .* step=seed uses=constant status=resumed/);
-  assert.match(again.stdout, /^run \S+ ok: cli-resumable, 3 steps \(1 resumed\)\n$/);
-  assert.deepEqual(await listRuns(first.cwd), []);
+  assert.match(again.stdout, new RegExp(`^run \\S+ ok: cli-resumable, 3 steps \\(1 resumed\\)${REPORT_TAIL}\\n$`));
+  assert.deepEqual(await listRuns(first.cwd), ['<report>', '<report>'], 'the checkpoint is gone; both runs left their report');
 });
 
 test('a gated step exits 3 with the review file named on stdout; the same command with --approve resumes and completes', async () => {
   const run = await cli(['--pipeline', fixture('gated')]);
   assert.equal(run.code, 3, run.stderr);
-  assert.match(run.stdout, /^run \S+ gated: cli-gated stopped before step "publish" \(constant\); review runs\/cli-gated\.review\.md, then re-run with --approve\n$/);
+  assert.match(run.stdout, new RegExp(`^run \\S+ gated: cli-gated stopped before step "publish" \\(constant\\); review runs/cli-gated\\.review\\.md, then re-run with --approve${REPORT_TAIL}\\n$`));
   assert.match(run.stderr, /warn run gated .* step=publish uses=constant review=runs\/cli-gated\.review\.md/);
   assert.doesNotMatch(run.stderr, /^error:/m);
-  assert.deepEqual(await listRuns(run.cwd), ['cli-gated.checkpoint.json', 'cli-gated.review.md']);
+  assert.deepEqual(await listRuns(run.cwd), ['<report>', 'cli-gated.checkpoint.json', 'cli-gated.review.md']);
   const review = await readFile(path.join(run.cwd, 'runs', 'cli-gated.review.md'), 'utf8');
   assert.match(review, /^# Review: cli-gated stopped before "publish" \(constant\)\n/);
   assert.match(review, /## Input "seed" \(output of step "seed"\)\n\n```\nok\n```\n/);
@@ -221,8 +234,8 @@ test('a gated step exits 3 with the review file named on stdout; the same comman
   assert.equal(again.code, 0, again.stderr);
   assert.match(again.stderr, /info step .* step=seed uses=constant status=resumed/);
   assert.match(again.stderr, /info gate approved .* step=publish/);
-  assert.match(again.stdout, /^run \S+ ok: cli-gated, 3 steps \(1 resumed\)\n$/);
-  assert.deepEqual(await listRuns(run.cwd), [], 'the checkpoint and the review file are both gone');
+  assert.match(again.stdout, new RegExp(`^run \\S+ ok: cli-gated, 3 steps \\(1 resumed\\)${REPORT_TAIL}\\n$`));
+  assert.deepEqual(await listRuns(run.cwd), ['<report>', '<report>'], 'the checkpoint and the review file are both gone');
 });
 
 // --- the LLM slot, end to end --------------------------------------------------------------------------------------
@@ -230,7 +243,7 @@ test('a gated step exits 3 with the review file named on stdout; the same comman
 test('AWK_LLM=mock runs an LLM step green on the mock: mode line, llm line and real in=/out= on the step line', async () => {
   const run = await cli(['--pipeline', fixture('ask')]);
   assert.equal(run.code, 0, run.stderr);
-  assert.match(run.stdout, /^run \S+ ok: cli-ask, 1 step\n$/);
+  assert.match(run.stdout, new RegExp(`^run \\S+ ok: cli-ask, 1 step${REPORT_TAIL}\\n$`));
   assert.match(run.stderr, /info llm mode mode=mock reason="AWK_LLM=mock"/);
   assert.match(run.stderr, /info llm model=mock ms=0 in=11 out=3 stop=end_turn/);
   assert.match(run.stderr, /info step .* step=ask uses=ask status=done attempt=1 ms=\d+ in=11 out=3/);
@@ -343,7 +356,7 @@ test('AWK_LLM=claude-code spawns `claude` from PATH: headless flags, the env mod
   const env = { AWK_LLM: 'claude-code', PATH: `${fake.bin}${path.delimiter}${process.env.PATH ?? ''}`, ANTHROPIC_MODEL: 'claude-opus-5', AWK_FAKE_CLAUDE_RESULT: canned() };
   const run = await cli(['--pipeline', fixture('ask')], undefined, env);
   assert.equal(run.code, 0, run.stderr);
-  assert.match(run.stdout, /^run \S+ ok: cli-ask, 1 step\n$/);
+  assert.match(run.stdout, new RegExp(`^run \\S+ ok: cli-ask, 1 step${REPORT_TAIL}\\n$`));
   assert.match(run.stderr, /info llm mode mode=claude-code reason="AWK_LLM=claude-code" model=claude-opus-5/);
   assert.match(run.stderr, /info llm model=claude-opus-5 ms=\d+ in=880 out=7 stop=end_turn cost=0\.0028/);
   assert.match(run.stderr, /info step .* step=ask uses=ask status=done attempt=1 ms=\d+ in=880 out=7/);
@@ -361,5 +374,5 @@ test('unset AWK_LLM with no key picks claude-code when `claude` is on PATH; a CL
   const run = await cli(['--pipeline', fixture('ask')], undefined, env);
   assert.equal(run.code, 1);
   assert.match(run.stderr, /info llm mode mode=claude-code reason="claude on PATH" model=claude-sonnet-5/);
-  assert.match(run.stderr, /^error: run \S+ failed at step "ask" \(ask\) after 1 attempt: claude-code: exit 1, api status 404: There's an issue with the selected model \(claude-sonnet-5\)\.\n$/m);
+  assert.match(run.stderr, new RegExp(`^error: run \\S+ failed at step "ask" \\(ask\\) after 1 attempt: claude-code: exit 1, api status 404: There's an issue with the selected model \\(claude-sonnet-5\\)\\.${REPORT_TAIL}\\n$`, 'm'));
 });

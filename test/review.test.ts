@@ -83,7 +83,7 @@ test('renderReview falls back to every completed output without a usable `from`,
 test('renderReview fences params with more backticks than the content holds, and clips an over-long output', () => {
   const text = renderReview(pipeline, { id: 'g', uses: noop, params: { note: 'a ```` b' } }, [], { big: 'x'.repeat(REVIEW_MAX_CHARS + 10) }, 'r5', at);
   assert.match(text, /`````json\n\{\n {2}"note": "a ```` b"\n\}\n`````\n/);
-  assert.match(text, new RegExp(`\\nx{${REVIEW_MAX_CHARS}}\\n\\[… cut at ${REVIEW_MAX_CHARS} characters\\]\\n`));
+  assert.match(text, new RegExp(`\\nx{${REVIEW_MAX_CHARS}}… \\[cut at ${REVIEW_MAX_CHARS} characters\\]\\n`), 'the cut marker shared with the report');
   assert.doesNotMatch(text, new RegExp(`x{${REVIEW_MAX_CHARS + 1}}`));
 });
 

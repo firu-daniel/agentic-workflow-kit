@@ -111,6 +111,10 @@ export interface RetryPolicy {
 
 export const DEFAULT_RETRY: RetryPolicy = { attempts: 3, baseDelayMs: 1000 };
 
+/** A value that becomes a file name under runs/ must match this: the pipeline name, which keys the checkpoint and the
+ * review file (checked in src/cli.ts), and the run id, which keys the report (checked in src/runner.ts). */
+export const FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
 /** One entry in a pipeline file. */
 export interface PipelineStep<TParams = unknown, TOutput = unknown> {
   /** Unique within the pipeline; later steps read this step's output as `inputs[id]`. */
@@ -162,7 +166,7 @@ export interface Checkpoint {
   updatedAt: string;
 }
 
-/** Per-step outcome kept by the runner; the run report renders one line per record.
+/** Per-step outcome kept by the runner; the run report (src/report.ts) renders one line per record.
  * `attempts` counts every attempt made; `durationMs` and `usage` are summed across them (backoff waits excluded);
  * `error` is the last attempt's. `resumed` = output taken from the checkpoint, not run: attempts 0, zero duration and
  * tokens. `gated` = the run stopped before this step for want of --approve: attempts 0, zero duration and tokens,
@@ -187,6 +191,13 @@ export interface RunResult {
   records: StepRecord[];
   /** Present on a dry run only; `records` is then empty. */
   plan?: PlanEntry[];
+  /** `runs/<runId>.md`, the report every run that is not a dry run writes (src/report.ts): one line per record, the
+   * totals, the final artifact. Absent on a dry run, and when the write failed (logged as a warning; the run's outcome
+   * stands). Never removed by the runner. */
+  report?: string;
+  /** The error a run threw outside a step, present only on the result the report was written from: the runner rethrows
+   * that error, so no caller is handed this result. */
+  error?: string;
 }
 
 /** One step of the --dry-run plan: the resolved settings and what a real run would do with the step right now. */

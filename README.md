@@ -13,11 +13,11 @@ Requires Node 20+. No build step (runs through `tsx`).
 ```sh
 npm install
 AWK_OFFLINE=1 AWK_LLM=mock npm run start -- --pipeline example-changelog             # five library steps, fixture + mock, no network; stops at the gate (exit 3)
-AWK_OFFLINE=1 AWK_LLM=mock npm run start -- --pipeline example-changelog --approve   # resumes from the checkpoint, writes out/changelog.md
+AWK_OFFLINE=1 AWK_LLM=mock npm run start -- --pipeline example-changelog --approve   # resumes from the checkpoint, writes out/changelog.md and runs/<timestamp>.md
 npm run start -- --pipeline example-changelog                                        # the same against GitHub and the selected LLM
 npm run start -- --pipeline smoke --dry-run                                          # the plan for a run; no step is called
 npm run start -- --pipeline smoke --fresh                                            # discard the checkpoint, run every step again
-npm test                                                                             # 108 tests, offline
+npm test                                                                             # 121 tests, offline
 npm run typecheck                                                                    # tsc --noEmit
 ```
 
@@ -25,7 +25,8 @@ Flags: `--pipeline <name>` (required; a value containing `/` is a path to a pipe
 cwd — under `npm run` that is the package root), `--dry-run`, `--approve`, `--fresh`. The LLM mode comes from
 the environment, not from a flag (see below). Exit code 0 is a completed run, a dry run or `--help`; 1 names the
 step that failed after its retries, or a run that threw outside a step; 2 a usage or pipeline-file error; 3 a
-gate waiting for approval. Log lines go to stderr, the plan and the summary to stdout.
+gate waiting for approval. Log lines go to stderr, the plan and the summary to stdout; the summary names the run's
+report.
 
 ## The steps
 
@@ -58,10 +59,39 @@ version that exercises the loop, one verify failure and one retry.
 |---|---|---|
 | `runs/<name>.checkpoint.json` | every completed step's output, keyed by step id | while the run is incomplete; a completed run or `--fresh` removes it |
 | `runs/<name>.review.md` | what a gated step would do and consume, the completed steps, how to re-run | from the gate stop until the `--approve` run reaches the step; a completed run or `--fresh` clears it too |
+| `runs/<timestamp>.md` | the run report: one line per step (status, attempts, ms, tokens, error, artifact), the totals, the final artifact, and why a run stopped | kept; never removed by the runner |
 | `out/<path>` | the artifact an `emit` step writes | kept |
 
 Both directories are relative to the cwd — under `npm run start` that is the package root — and are git-ignored
 except for their `.gitkeep`.
+
+The report is the evidence a run leaves behind: every run that is not a dry run writes one at the end, whatever
+the outcome — a completed run, a step failure, a gate, and a run that threw outside a step, which is reported and
+then rethrown; only a dry run writes none — and the summary line names it. It is a page of markdown — under 30
+lines for a five-step pipeline — meant to be pasted as it is:
+
+```
+# Run 2026-09-12T09-49-20-908Z: example-changelog ok
+
+Started 2026-09-12T09:49:20.908Z, 2 ms wall clock with --approve; 5 steps (4 resumed, 0 retries), tokens in/out 0/0.
+
+| # | step | uses | status | attempts | ms | tokens in/out | error | artifact |
+|---|---|---|---|---|---|---|---|---|
+| 1 | releases | fetchPages | resumed | 0 | 0 | 0/0 |  |  |
+| 2 | facts | extract | resumed | 0 | 0 | 0/0 |  |  |
+| 3 | outline | plan | resumed | 0 | 0 | 0/0 |  |  |
+| 4 | post | draft | resumed | 0 | 0 | 0/0 |  |  |
+| 5 | publish | emit | done | 1 | 1 | 0/0 |  | out/changelog.md |
+
+Artifact: out/changelog.md
+```
+
+A failed run's report ends with a `Failed:` line carrying the step, its attempts and the error; a gated run's
+with a `Gated:` line naming the review file; a run that threw outside a step with a `Stopped:` line carrying that
+error. `Artifact:` names the last artifact a step wrote, so a gated run reads `none` unless an earlier step
+produced one — the review file is run state, and the `Gated:` line is where it belongs. The table's error cell is
+cut at 200 characters, the closing line at 2000, and both escape what they carry, so nothing inside an error can
+open a row or a line of its own. A report that cannot be written is a warning in the log, not a failed run.
 
 ## Design choices
 
@@ -105,9 +135,11 @@ completed. A completed run clears the checkpoint, so the demo gates from scratch
 
 **One pipeline is one file, and the runner core is 200 lines.** Writing a new workflow means writing one
 declarative file against a fixed step library: the demo pipeline is 79 lines and imports five steps. The core
-(`src/runner.ts`) is 200 lines, with the checkpoint store and the review writer split out of it (`src/log.ts` is
-shared by every module, not a runner split). The budget is a habit, not a CI check — if it starts slipping, that
-is the signal the runner is taking on work the step library should own.
+(`src/runner.ts`) is 200 lines, with the checkpoint store, the review writer and the run report split out of it
+(`src/log.ts` is shared by every module, not a runner split: the logger, plus the value rendering — `toText`,
+`prettyText`, `errorText` — and the markdown `cell` and `clip` the review file and the report write with). The
+budget is a habit, not a CI check — if it starts slipping, that is the signal the runner is taking on work the
+step library should own.
 
 ## LLM modes and environment
 
@@ -144,4 +176,4 @@ deliverable — and `GITHUB_API_URL` points those GitHub calls elsewhere (defaul
 
 Runner core (sequential loop, per-step checkpoint and resume, retry with backoff, dry-run, CLI), the LLM slot
 (Claude Code CLI, Anthropic SDK client and offline mock, picked by environment), the step library, the example
-pipeline and the approval gate are in. The per-run report (`runs/<timestamp>.md`, one line per step) follows.
+pipeline, the approval gate and the per-run report are in.

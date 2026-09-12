@@ -5,7 +5,7 @@
 // `stopAtGate`; everything else here renders the file. Core module: it must not import from src/steps/.
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { prettyText } from './log.js';
+import { cell, clip, prettyText } from './log.js';
 import type { Logger, Pipeline, PipelineStep, StepRecord } from './types.js';
 
 /** `<runsDir>/<pipeline>.review.md`, next to the checkpoint. */
@@ -59,7 +59,7 @@ export function renderReview(
     '',
     ...named.filter((id) => !Object.hasOwn(inputs, id))
       .flatMap((id) => [`Warning: input "${id}" is not the output of an earlier step; approving will fail this step.`, '']),
-    ...shown.flatMap((id) => [`## Input "${id}" (output of step "${id}")`, '', fence(clip(prettyText(inputs[id])), ''), '']),
+    ...shown.flatMap((id) => [`## Input "${id}" (output of step "${id}")`, '', fence(clip(prettyText(inputs[id]), REVIEW_MAX_CHARS), ''), '']),
     ...(done.length ? [
       '## Completed steps',
       '',
@@ -81,12 +81,6 @@ function fromIds(params: unknown): string[] {
   if (typeof from === 'string') return [from];
   return Array.isArray(from) ? from.filter((v): v is string => typeof v === 'string') : [];
 }
-
-/** One markdown table cell: a `|` would open a column and a newline would end the row, so both are escaped. */
-const cell = (value: string): string => value.replace(/\|/g, '\\|').replace(/\r?\n/g, '\\n');
-
-const clip = (text: string): string =>
-  text.length <= REVIEW_MAX_CHARS ? text : `${text.slice(0, REVIEW_MAX_CHARS)}\n[… cut at ${REVIEW_MAX_CHARS} characters]`;
 
 /** A fenced block whose fence is longer than any backtick run inside, so the content cannot close it early. */
 function fence(text: string, lang: string): string {
