@@ -1,9 +1,13 @@
-// Drives src/llm.ts: the selector, the offline mock, and the Anthropic implementation against a fake SDK client (no
-// network). The CLI tests run the real SDK against a local stand-in server. Run with `npm test`.
+// Drives src/llm.ts: the selector, the offline mock, the Anthropic implementation against a fake SDK client (no
+// network) and the Claude Code implementation against a fake exec (no process). The CLI tests run the real SDK against
+// a local stand-in server and the real spawn against a fake `claude` script. Run with `npm test`.
 import Anthropic, { RetryableError } from '@anthropic-ai/sdk';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { anthropicLlm, createLlm, DEFAULT_MAX_TOKENS, DEFAULT_MODEL, MOCK_MODEL, mockLlm, type MessagesApi } from '../src/llm.js';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { anthropicLlm, claudeCodeLlm, claudeOnPath, createLlm, defaultClaudeExec, DEFAULT_MAX_TOKENS, DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT, EXEC_TIMEOUT_MS, LLM_MODES, LlmModeError, MOCK_MODEL, mockLlm, type ClaudeExec, type MessagesApi } from '../src/llm.js';
 import { createLogger } from '../src/log.js';
 import { NonRetryableError } from '../src/types.js';
 
@@ -54,28 +58,108 @@ const apiError = (status: number, type: string, msg: string): InstanceType<typeo
 
 // --- selector ------------------------------------------------------------------------------------------------------
 
-test('createLlm picks the mock without ANTHROPIC_API_KEY and logs why; an empty key counts as unset', async () => {
-  for (const env of [{}, { ANTHROPIC_API_KEY: '' }]) {
+/** An env with an empty PATH, so the machine's own `claude` cannot leak into a selector case. */
+const noPath = (env: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ PATH: '', ...env });
+
+/** A temp dir holding an executable `claude`, one holding a non-executable one, and one where `claude` is a directory
+ * (which carries the execute bit, so only the file check rules it out). */
+async function fakeBinDirs(): Promise<{ withClaude: string; withoutX: string; withDir: string; cleanup: () => Promise<void> }> {
+  const [withClaude, withoutX, withDir] = await Promise.all(
+    [0, 1, 2].map(() => mkdtemp(path.join(tmpdir(), 'awk-bin-'))),
+  );
+  await writeFile(path.join(withClaude, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  await writeFile(path.join(withoutX, 'claude'), 'not executable', { mode: 0o644 });
+  await mkdir(path.join(withDir, 'claude'));
+  const dirs = [withClaude, withoutX, withDir];
+  return { withClaude, withoutX, withDir, cleanup: () => Promise.all(dirs.map((d) => rm(d, { recursive: true, force: true }))).then(() => undefined) };
+}
+
+test('claudeOnPath finds an executable claude in a PATH entry, skips a non-executable one and a directory, and is false for an empty PATH', async () => {
+  const dirs = await fakeBinDirs();
+  try {
+    assert.equal(claudeOnPath({ PATH: '' }), false);
+    assert.equal(claudeOnPath({}), false);
+    assert.equal(claudeOnPath({ PATH: dirs.withoutX }), false);
+    assert.equal(claudeOnPath({ PATH: dirs.withDir }), false);
+    assert.equal(claudeOnPath({ PATH: [dirs.withoutX, dirs.withDir, dirs.withClaude].join(path.delimiter) }), true);
+  } finally {
+    await dirs.cleanup();
+  }
+});
+
+test('createLlm picks the mock with nothing set and logs why; an empty AWK_LLM or key counts as unset', async () => {
+  for (const env of [noPath(), noPath({ ANTHROPIC_API_KEY: '', AWK_LLM: '' })]) {
     const { lines, log } = capture();
     const llm = createLlm(env, log);
-    assert.match(lines[0], /info llm mode mode=mock reason="ANTHROPIC_API_KEY not set"$/);
+    assert.match(lines[0], /info llm mode mode=mock reason="no AWK_LLM, no ANTHROPIC_API_KEY, no claude on PATH"$/);
     const res = await llm.complete({ prompt: 'hi' });
     assert.match(res.text, /^\[mock reply\]/);
   }
 });
 
-test('createLlm picks the Anthropic client with a key: default model, or ANTHROPIC_MODEL when set and non-empty', () => {
-  const cases: [NodeJS.ProcessEnv, string][] = [
-    [{ ANTHROPIC_API_KEY: 'k' }, DEFAULT_MODEL],
-    [{ ANTHROPIC_API_KEY: 'k', ANTHROPIC_MODEL: '' }, DEFAULT_MODEL],
-    [{ ANTHROPIC_API_KEY: 'k', ANTHROPIC_MODEL: 'claude-opus-5' }, 'claude-opus-5'],
-  ];
+test('createLlm unset: a key picks anthropic over claude on PATH; claude on PATH alone picks claude-code', async () => {
+  const dirs = await fakeBinDirs();
+  try {
+    let { lines, log } = capture();
+    createLlm({ PATH: dirs.withClaude, ANTHROPIC_API_KEY: 'k' }, log);
+    assert.match(lines[0], /info llm mode mode=anthropic reason="ANTHROPIC_API_KEY set" model=claude-sonnet-5$/);
+    ({ lines, log } = capture());
+    createLlm({ PATH: dirs.withClaude, ANTHROPIC_MODEL: 'claude-opus-5' }, log);
+    assert.match(lines[0], /info llm mode mode=claude-code reason="claude on PATH" model=claude-opus-5$/);
+  } finally {
+    await dirs.cleanup();
+  }
+});
+
+test('createLlm: AWK_LLM wins over the key and PATH; an unknown value throws LlmModeError naming it and the modes', async () => {
+  assert.deepEqual(LLM_MODES, ['claude-code', 'anthropic', 'mock']);
   assert.equal(DEFAULT_MODEL, 'claude-sonnet-5');
-  for (const [env, model] of cases) {
+  const dirs = await fakeBinDirs();
+  const onPath = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({ PATH: dirs.withClaude, ...env });
+  try {
+    const cases: [NodeJS.ProcessEnv, RegExp][] = [
+      [noPath({ AWK_LLM: 'mock', ANTHROPIC_API_KEY: 'k' }), /mode=mock reason="AWK_LLM=mock"$/],
+      [onPath({ AWK_LLM: 'claude-code', ANTHROPIC_API_KEY: 'k' }), /mode=claude-code reason="AWK_LLM=claude-code" model=claude-sonnet-5$/],
+      [noPath({ AWK_LLM: 'anthropic' }), /mode=anthropic reason="AWK_LLM=anthropic" model=claude-sonnet-5$/],
+      [noPath({ AWK_LLM: 'anthropic', ANTHROPIC_MODEL: '' }), /mode=anthropic reason="AWK_LLM=anthropic" model=claude-sonnet-5$/],
+      [onPath({ AWK_LLM: 'claude-code', ANTHROPIC_MODEL: 'claude-opus-5' }), /mode=claude-code reason="AWK_LLM=claude-code" model=claude-opus-5$/],
+    ];
+    for (const [env, expected] of cases) {
+      const { lines, log } = capture();
+      createLlm(env, log);
+      assert.equal(lines.length, 1);
+      assert.match(lines[0], expected);
+    }
+  } finally {
+    await dirs.cleanup();
+  }
+  const { lines, log } = capture();
+  assert.throws(() => createLlm(noPath({ AWK_LLM: 'openai' }), log), (err: unknown) => {
+    assert.ok(err instanceof LlmModeError);
+    assert.equal(err.message, 'AWK_LLM="openai" is not a mode: expected one of claude-code, anthropic, mock');
+    return true;
+  });
+  assert.equal(lines.length, 0);
+});
+
+test('createLlm throws LlmModeError for AWK_LLM=claude-code with no claude on PATH, before logging a mode line', async () => {
+  const dirs = await fakeBinDirs();
+  try {
+    for (const env of [noPath({ AWK_LLM: 'claude-code' }), { PATH: dirs.withoutX, AWK_LLM: 'claude-code' }]) {
+      const { lines, log } = capture();
+      assert.throws(() => createLlm(env, log), (err: unknown) => {
+        assert.ok(err instanceof LlmModeError);
+        assert.equal(err.message, 'AWK_LLM=claude-code but no executable `claude` on PATH: install the Claude Code CLI or set AWK_LLM=anthropic|mock');
+        return true;
+      });
+      assert.equal(lines.length, 0);
+    }
+    // The same env without AWK_LLM falls back to the mock rather than throwing.
     const { lines, log } = capture();
-    createLlm(env, log);
-    assert.equal(lines.length, 1);
-    assert.match(lines[0], new RegExp(`info llm mode mode=anthropic model=${model}$`));
+    createLlm(noPath(), log);
+    assert.match(lines[0], /mode=mock /);
+  } finally {
+    await dirs.cleanup();
   }
 });
 
@@ -217,4 +301,206 @@ test('anthropicLlm turns a non-API SDK error into NonRetryableError, but rethrow
     assert.equal(err instanceof NonRetryableError, false);
     return true;
   });
+});
+
+// --- claude-code ---------------------------------------------------------------------------------------------------
+
+/** A complete CLI result JSON (CC 2.1.269, the fields the client reads) with overrides. */
+function resultJson(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false, stop_reason: 'end_turn', api_error_status: null, total_cost_usd: 0.0028,
+    usage: { input_tokens: 880, output_tokens: 7, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    result: 'Forty-two', num_turns: 1, session_id: 's', duration_ms: 1213,
+    ...overrides,
+  });
+}
+
+interface ExecCall { args: string[]; stdin: string; options: { env: NodeJS.ProcessEnv; timeoutMs: number } }
+/** A fake exec that records each call and answers from a queue of results (or throws an Error). */
+function fakeExec(answers: ({ code?: number; stdout?: string; stderr?: string } | Error)[]): ClaudeExec & { calls: ExecCall[] } {
+  const calls: ExecCall[] = [];
+  const exec = (async (args: string[], stdin: string, options: { env: NodeJS.ProcessEnv; timeoutMs: number }) => {
+    calls.push({ args, stdin, options });
+    const next = answers.shift();
+    if (!next) throw new Error('fake exec: no answer queued');
+    if (next instanceof Error) throw next;
+    return { code: next.code ?? 0, stdout: next.stdout ?? '', stderr: next.stderr ?? '' };
+  }) as ClaudeExec & { calls: ExecCall[] };
+  exec.calls = calls;
+  return exec;
+}
+
+test('claudeCodeLlm runs claude -p headless with tools off, one turn, no session, no customizations, the model, --system-prompt on every call, the prompt on stdin and the given env and timeout', async () => {
+  const { log } = capture();
+  const exec = fakeExec([{ stdout: resultJson() }, { stdout: resultJson() }]);
+  const env = { PATH: '/x', HOME: '/h' };
+  const llm = claudeCodeLlm({ model: 'claude-opus-5', log, exec, env });
+  await llm.complete({ prompt: 'ping' });
+  await llm.complete({ system: 'Be terse.', prompt: 'line 1\nline 2 "quoted" $HOME', maxTokens: 64, mockReply: 'ignored' });
+  const base = [
+    '-p', '--output-format', 'json', '--model', 'claude-opus-5', '--tools', '', '--max-turns', '1',
+    '--no-session-persistence', '--safe-mode', '--strict-mcp-config', '--system-prompt',
+  ];
+  const options = { env, timeoutMs: EXEC_TIMEOUT_MS };
+  assert.equal(EXEC_TIMEOUT_MS, 10 * 60_000);
+  assert.equal(DEFAULT_SYSTEM_PROMPT, 'You are a helpful assistant.');
+  assert.deepEqual(exec.calls[0], { args: [...base, DEFAULT_SYSTEM_PROMPT], stdin: 'ping', options });
+  assert.deepEqual(exec.calls[1], { args: [...base, 'Be terse.'], stdin: 'line 1\nline 2 "quoted" $HOME', options });
+});
+
+test('claudeCodeLlm passes an overridden timeoutMs through to the exec, and rejects an empty prompt before spawning', async () => {
+  const { lines, log } = capture();
+  const exec = fakeExec([{ stdout: resultJson() }]);
+  const llm = claudeCodeLlm({ model: 'm', log, exec, env: {}, timeoutMs: 1234 });
+  await assert.rejects(llm.complete({ prompt: '' }), (err: unknown) => {
+    assert.ok(err instanceof NonRetryableError);
+    assert.equal(err.message, 'claude-code: the prompt is empty');
+    return true;
+  });
+  assert.equal(exec.calls.length, 0);
+  assert.equal(lines.length, 0);
+  await llm.complete({ prompt: 'p' });
+  assert.deepEqual(exec.calls[0].options, { env: {}, timeoutMs: 1234 });
+});
+
+test('claudeCodeLlm returns the result text, sums cache tokens into input, flags both cut stop reasons as truncated, and logs the call with cost=', async () => {
+  const { lines, log } = capture();
+  const cached = resultJson({ usage: { input_tokens: 5, output_tokens: 9, cache_creation_input_tokens: 100, cache_read_input_tokens: 200 }, total_cost_usd: 0.5 });
+  const cut = resultJson({ stop_reason: 'max_tokens' });
+  const outOfWindow = resultJson({ stop_reason: 'model_context_window_exceeded' });
+  const bare = resultJson({ result: undefined, usage: undefined, total_cost_usd: undefined, stop_reason: undefined });
+  const llm = claudeCodeLlm({ model: 'm', log, exec: fakeExec([{ stdout: cached }, { stdout: cut }, { stdout: outOfWindow }, { stdout: bare }]) });
+  assert.deepEqual(await llm.complete({ prompt: 'p' }), { text: 'Forty-two', usage: { input: 305, output: 9 }, truncated: false });
+  assert.deepEqual(await llm.complete({ prompt: 'p' }), { text: 'Forty-two', usage: { input: 880, output: 7 }, truncated: true });
+  assert.deepEqual(await llm.complete({ prompt: 'p' }), { text: 'Forty-two', usage: { input: 880, output: 7 }, truncated: true });
+  assert.deepEqual(await llm.complete({ prompt: 'p' }), { text: '', usage: { input: 0, output: 0 }, truncated: false });
+  assert.equal(lines.length, 4);
+  assert.match(lines[0], /info llm model=m ms=\d+ in=305 out=9 stop=end_turn cost=0\.5$/);
+  assert.match(lines[1], /info llm model=m ms=\d+ in=880 out=7 stop=max_tokens cost=0\.0028$/);
+  assert.match(lines[2], /info llm model=m ms=\d+ in=880 out=7 stop=model_context_window_exceeded cost=0\.0028$/);
+  assert.match(lines[3], /info llm model=m ms=\d+ in=0 out=0 stop=unknown cost=0$/);
+});
+
+test('claudeCodeLlm throws a plain Error on a non-zero exit or is_error (the runner retries), after logging the call', async () => {
+  const { lines, log } = capture();
+  const limited = resultJson({ is_error: true, result: 'You have hit your limit; resets at 15:00', total_cost_usd: 0 });
+  const llm = claudeCodeLlm({ model: 'm', log, exec: fakeExec([
+    { code: 1, stdout: limited },
+    { code: 0, stdout: resultJson({ is_error: true, api_error_status: 529, result: 'overloaded' }) },
+    { code: 1, stdout: resultJson({ is_error: true, result: '' }), stderr: 'boom on stderr\n' },
+  ]) });
+  await assert.rejects(llm.complete({ prompt: 'p' }), (err: unknown) => {
+    assert.ok(err instanceof Error && !(err instanceof NonRetryableError));
+    assert.equal(err.message, 'claude-code: exit 1: You have hit your limit; resets at 15:00');
+    assert.deepEqual(err.cause, JSON.parse(limited));
+    return true;
+  });
+  await assert.rejects(llm.complete({ prompt: 'p' }), (err: unknown) => {
+    assert.ok(err instanceof Error && !(err instanceof NonRetryableError));
+    assert.equal(err.message, 'claude-code: exit 0, api status 529: overloaded');
+    return true;
+  });
+  await assert.rejects(llm.complete({ prompt: 'p' }), /^Error: claude-code: exit 1: boom on stderr$/);
+  assert.equal(lines.length, 3);
+  assert.match(lines[0], /info llm model=m .* stop=end_turn cost=0$/);
+});
+
+test('claudeCodeLlm throws NonRetryableError when the CLI reports an API status a retry cannot fix, with the result as the cause', async () => {
+  const { log } = capture();
+  const notFound = resultJson({ is_error: true, api_error_status: 404, result: "There's an issue with the selected model (nope)." });
+  const llm = claudeCodeLlm({ model: 'nope', log, exec: fakeExec([{ code: 1, stdout: notFound }, { code: 1, stdout: resultJson({ is_error: true, api_error_status: 401, result: 'x' }) }, { code: 1, stdout: resultJson({ is_error: true, api_error_status: 429, result: 'slow' }) }]) });
+  await assert.rejects(llm.complete({ prompt: 'p' }), (err: unknown) => {
+    assert.ok(err instanceof NonRetryableError);
+    assert.equal(err.message, "claude-code: exit 1, api status 404: There's an issue with the selected model (nope).");
+    assert.deepEqual(err.cause, JSON.parse(notFound));
+    return true;
+  });
+  await assert.rejects(llm.complete({ prompt: 'p' }), /^NonRetryableError: claude-code: exit 1, api status 401: x$/);
+  await assert.rejects(llm.complete({ prompt: 'p' }), (err: unknown) => {
+    assert.equal(err instanceof NonRetryableError, false);
+    return true;
+  });
+});
+
+test('claudeCodeLlm throws a plain Error when the output is not JSON (stderr, else stdout, in the message)', async () => {
+  const { lines, log } = capture();
+  const llm = claudeCodeLlm({ model: 'm', log, exec: fakeExec([{ code: 1, stdout: '', stderr: 'not logged in\n' }, { code: 0, stdout: 'plain text' }]) });
+  await assert.rejects(llm.complete({ prompt: 'p' }), (err: unknown) => {
+    assert.ok(err instanceof Error && !(err instanceof NonRetryableError));
+    assert.equal(err.message, 'claude-code: exit 1, result is not JSON: not logged in');
+    assert.ok(err.cause instanceof SyntaxError);
+    return true;
+  });
+  await assert.rejects(llm.complete({ prompt: 'p' }), /^Error: claude-code: exit 0, result is not JSON: plain text$/);
+  assert.equal(lines.length, 0);
+});
+
+test('claudeCodeLlm turns an ENOENT or EACCES spawn failure into NonRetryableError, and rethrows any other exec failure as it is', async () => {
+  const { lines, log } = capture();
+  const missing = Object.assign(new Error('spawn claude ENOENT'), { code: 'ENOENT' });
+  const denied = Object.assign(new Error('spawn claude EACCES'), { code: 'EACCES' });
+  const killed = new Error('claude-code: claude killed by SIGTERM');
+  const llm = claudeCodeLlm({ model: 'm', log, exec: fakeExec([missing, denied, killed]) });
+  for (const spawnError of [missing, denied]) {
+    await assert.rejects(llm.complete({ prompt: 'p' }), (err: unknown) => {
+      assert.ok(err instanceof NonRetryableError);
+      assert.equal(err.message, `claude-code: cannot run \`claude\`: ${spawnError.message}`);
+      assert.equal(err.cause, spawnError);
+      return true;
+    });
+  }
+  await assert.rejects(llm.complete({ prompt: 'p' }), (err: unknown) => {
+    assert.equal(err, killed);
+    assert.equal(err instanceof NonRetryableError, false);
+    return true;
+  });
+  assert.equal(lines.length, 0);
+});
+
+// --- defaultClaudeExec, against real temp scripts (never the machine's own `claude`) --------------------------------
+
+/** A temp dir on which `claude` is the given shell script, and a PATH holding only that dir. POSIX only. */
+async function scriptBin(body: string): Promise<{ dir: string; env: NodeJS.ProcessEnv }> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'awk-exec-'));
+  await writeFile(path.join(dir, 'claude'), `#!/bin/sh\n${body}`, { mode: 0o755 });
+  return { dir, env: { PATH: dir } };
+}
+
+const posixOnly = { skip: process.platform === 'win32' ? 'POSIX only' : false };
+
+test('defaultClaudeExec resolves when the child ignores a multi-MB stdin and exits 0 (the stdin error is swallowed)', posixOnly, async () => {
+  const bin = await scriptBin(`printf '%s' '${resultJson()}'\nexit 0\n`);
+  try {
+    const res = await defaultClaudeExec(['-p'], 'x'.repeat(8 * 1024 * 1024), { env: bin.env, timeoutMs: EXEC_TIMEOUT_MS });
+    assert.equal(res.code, 0);
+    assert.equal(JSON.parse(res.stdout).result, 'Forty-two');
+  } finally {
+    await rm(bin.dir, { recursive: true, force: true });
+  }
+});
+
+test('defaultClaudeExec rejects with the wrapped message when the child is killed by a signal', posixOnly, async () => {
+  const bin = await scriptBin('kill -TERM $$\n');
+  try {
+    await assert.rejects(defaultClaudeExec(['-p'], 'p', { env: bin.env, timeoutMs: EXEC_TIMEOUT_MS }), (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal(err.message, 'claude-code: claude killed by SIGTERM');
+      assert.ok(err.cause instanceof Error);
+      return true;
+    });
+  } finally {
+    await rm(bin.dir, { recursive: true, force: true });
+  }
+});
+
+test('defaultClaudeExec rejects with the spawn error, ENOENT code intact, when no claude is on the PATH it is given', posixOnly, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'awk-exec-'));
+  try {
+    await assert.rejects(defaultClaudeExec(['-p'], 'p', { env: { PATH: dir }, timeoutMs: EXEC_TIMEOUT_MS }), (err: unknown) => {
+      assert.equal((err as { code?: unknown }).code, 'ENOENT');
+      return true;
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

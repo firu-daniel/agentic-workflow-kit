@@ -26,20 +26,24 @@ export interface Logger {
   error(message: string, fields?: Record<string, unknown>): void;
 }
 
-/** The LLM slot steps see: one completion per call, no conversation state. Implemented in src/llm.ts — the Anthropic
- * client (ANTHROPIC_API_KEY set) or the offline mock (key absent); `createLlm` there picks one. An error a retry cannot
- * fix (a bad request, a bad key, a refusal, an SDK error raised before any request was sent) is thrown as
- * NonRetryableError; anything else (rate limit, timeout, 5xx, network, an SDK error marked retryable) is thrown as is,
- * so the runner backs off and retries the step. */
+/** The LLM slot steps see: one completion per call, no conversation state. Implemented three times in src/llm.ts —
+ * the Claude Code CLI in headless mode (a subscription), the Anthropic client (an API key) and the offline mock;
+ * `createLlm` there picks one from AWK_LLM, else from what is available. An error a retry cannot fix (a bad request,
+ * a bad key, a refusal, an SDK error raised before any request was sent, an API status the CLI reports as such) is
+ * thrown as NonRetryableError; anything else (rate limit, timeout, 5xx, network, an SDK error marked retryable, a CLI
+ * exit without a status) is thrown as is, so the runner backs off and retries the step. */
 export interface LlmClient {
   complete(request: LlmRequest): Promise<LlmResponse>;
 }
 
 export interface LlmRequest {
+  /** The Anthropic backend sends none when this is unset; the Claude Code backend substitutes a neutral default
+   * (`DEFAULT_SYSTEM_PROMPT` in src/llm.ts), so a call never inherits Claude Code's own agent system prompt. */
   system?: string;
   prompt: string;
   /** Output cap for this call; the client's default applies when absent. A response cut at the cap comes back with
-   * `truncated: true` rather than an error (a retry with the same cap would be cut the same way). */
+   * `truncated: true` rather than an error (a retry with the same cap would be cut the same way). The Claude Code
+   * backend does not apply it — the CLI has no output-cap flag — so there only the model's own ceiling cuts an answer. */
   maxTokens?: number;
   /** What the offline mock returns for this request, verbatim; the real client ignores it. A library step supplies
    * one that satisfies its own verify rules (a schema-valid object, a draft with the required sections), so a pipeline

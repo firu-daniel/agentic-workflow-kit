@@ -1,18 +1,19 @@
 // The command behind `npm run start`: parses the flags, loads `pipelines/<name>.ts` (or a path to a pipeline file),
 // checks that its default export has the Pipeline shape, and hands it to the runner with the flags and the LLM slot
-// (src/llm.ts picks the Anthropic client or the offline mock from the environment). src/index.ts binds `main` to the
+// (src/llm.ts picks the Claude Code CLI, the Anthropic client or the offline mock from the environment). src/index.ts binds `main` to the
 // process; everything here is importable so the tests can drive the pieces without spawning one.
 // Exit codes: 0 a completed run, a dry run or --help; 1 a step failed after its retries (the step id is in the
-// message) or the run threw; 2 a usage error, or a pipeline file that cannot be found, cannot be loaded, or lacks a
-// required field (the path and the field are named). Log lines go to stderr; the plan and the summary to stdout.
+// message) or the run threw; 2 a usage error (an unknown flag, an AWK_LLM value that is not a mode, or
+// AWK_LLM=claude-code with no claude on PATH), or a pipeline
+// file that cannot be found, cannot be loaded, or lacks a required field (the path and the field are named). Log lines go to stderr; the plan and the summary to stdout.
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { createLlm } from './llm.js';
+import { createLlm, LlmModeError } from './llm.js';
 import { createLogger, errorText } from './log.js';
 import { runPipeline } from './runner.js';
-import type { Pipeline, RunFlags, RunResult } from './types.js';
+import type { LlmClient, Pipeline, RunFlags, RunResult } from './types.js';
 
 export const USAGE = `Usage: npm run start -- --pipeline <name> [--dry-run] [--approve] [--fresh]
 
@@ -23,12 +24,17 @@ export const USAGE = `Usage: npm run start -- --pipeline <name> [--dry-run] [--a
   --fresh            delete the pipeline's checkpoint first, so every step runs again
   --help, -h         this text
 
-Environment: with ANTHROPIC_API_KEY set, steps that call the LLM reach the Anthropic API (model from ANTHROPIC_MODEL,
-default claude-sonnet-5, and ANTHROPIC_BASE_URL honoured by the SDK, which is how the tests point it at a local stub);
-without it an offline mock answers every call, so a pipeline runs green with no key.
+Environment: AWK_LLM picks how steps that call the LLM are served — claude-code (the installed Claude Code CLI in
+headless mode, through the CLI's own login: a Claude subscription, or ANTHROPIC_API_KEY when it is set in the
+environment, which the CLI prefers; a step's maxTokens does not apply, the CLI having no output-cap flag), anthropic
+(the Anthropic API through the SDK, billed to ANTHROPIC_API_KEY; ANTHROPIC_BASE_URL is honoured, which is how the tests
+point it at a local stub) or mock (an offline mock answers every call, so a pipeline runs green with no key). Unset,
+the mode follows what is available: ANTHROPIC_API_KEY set → anthropic, else claude on PATH → claude-code, else mock.
+Both real modes take the model from ANTHROPIC_MODEL (default claude-sonnet-5).
 
 Exit code 0: the run completed, or --dry-run / --help. 1: a step failed after its retries (the step id is in the
-message). 2: a usage error, or a pipeline file that cannot be found or loaded, or lacks a required field.
+message). 2: a usage error (an unknown flag, an AWK_LLM value that is not a mode, or AWK_LLM=claude-code with no claude
+on PATH), or a pipeline file that cannot be found or loaded, or lacks a required field.
 Log lines go to stderr; the dry-run plan and the final summary go to stdout.
 `;
 
@@ -159,9 +165,17 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
   // One logger for the run and the LLM client, so the `llm` lines interleave with the step lines on stderr.
   const log = createLogger();
+  let llm: LlmClient;
+  try {
+    llm = createLlm(process.env, log);
+  } catch (err) {
+    if (!(err instanceof LlmModeError)) throw err;
+    process.stderr.write(`error: ${err.message}\n`);
+    return 2;
+  }
   let result: RunResult;
   try {
-    result = await runPipeline(pipeline, { flags: args.flags, llm: createLlm(process.env, log), log });
+    result = await runPipeline(pipeline, { flags: args.flags, llm, log });
   } catch (err) {
     // The runner throws only outside a step: an unreadable checkpoint, or an output the checkpoint cannot serialize.
     process.stderr.write(`error: pipeline "${pipeline.name}": ${errorText(err)}\n`);

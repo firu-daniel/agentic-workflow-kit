@@ -2,7 +2,7 @@
 // flags, real exit codes, the real `pipelines/smoke.ts` loaded through tsx). Run with `npm test`.
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { createRequire } from 'node:module';
 import type { AddressInfo } from 'node:net';
@@ -18,22 +18,24 @@ const fixture = (name: string): string => path.join(root, 'test', 'fixtures', `$
 /** Each child process runs in its own temp cwd so its runs/ never touches the repo's; a name still resolves to the
  * package's pipelines/ directory, a path is passed absolute. The child env is the parent's with Node startup warnings
  * off (a NODE_OPTIONS warning would land on the stderr the tests match exactly), the resume fixture's variable
- * cleared, so an ambient AWK_TEST_PASS cannot make its first run succeed, and ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN,
- * ANTHROPIC_MODEL, ANTHROPIC_BASE_URL and ANTHROPIC_LOG cleared, so an ambient credential cannot put a run in real
- * mode or reach the real API and ambient SDK debug output cannot land on the matched stdout; `env` adds per-test
- * overrides on top. */
-const cwds: string[] = [];
-after(() => Promise.all(cwds.map((d) => rm(d, { recursive: true, force: true }))));
+ * cleared, so an ambient AWK_TEST_PASS cannot make its first run succeed, AWK_LLM pinned to mock, so the machine's own
+ * `claude` cannot put a run on the subscription, and ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_MODEL,
+ * ANTHROPIC_BASE_URL and ANTHROPIC_LOG cleared, so an ambient credential cannot reach the real API and ambient SDK
+ * debug output cannot land on the matched stdout; `env` adds per-test overrides on top.
+ * `tempDirs` collects every directory the tests create — the child cwds and the fake-`claude` bin dirs — so one
+ * `after` hook removes them all. */
+const tempDirs: string[] = [];
+after(() => Promise.all(tempDirs.map((d) => rm(d, { recursive: true, force: true }))));
 const tsx = createRequire(import.meta.url).resolve('tsx/cli');
 async function cli(
   args: string[], cwd?: string, env?: NodeJS.ProcessEnv,
 ): Promise<{ code: number; stdout: string; stderr: string; cwd: string }> {
   if (!cwd) {
     cwd = await mkdtemp(path.join(tmpdir(), 'awk-cli-'));
-    cwds.push(cwd);
+    tempDirs.push(cwd);
   }
   return new Promise((resolve) => {
-    execFile(process.execPath, [tsx, path.join(root, 'src', 'index.ts'), ...args], { cwd, env: { ...process.env, NODE_OPTIONS: '--no-warnings', AWK_TEST_PASS: '', ANTHROPIC_API_KEY: '', ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_MODEL: '', ANTHROPIC_BASE_URL: '', ANTHROPIC_LOG: '', ...env } }, (err, stdout, stderr) => {
+    execFile(process.execPath, [tsx, path.join(root, 'src', 'index.ts'), ...args], { cwd, env: { ...process.env, NODE_OPTIONS: '--no-warnings', AWK_TEST_PASS: '', AWK_LLM: 'mock', ANTHROPIC_API_KEY: '', ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_MODEL: '', ANTHROPIC_BASE_URL: '', ANTHROPIC_LOG: '', ...env } }, (err, stdout, stderr) => {
       const code = err && typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : err ? -1 : 0;
       resolve({ code, stdout, stderr, cwd: cwd as string });
     });
@@ -204,11 +206,11 @@ test('a re-run resumes the checkpointed step: status=resumed on stderr, the resu
 
 // --- the LLM slot, end to end --------------------------------------------------------------------------------------
 
-test('without ANTHROPIC_API_KEY an LLM step runs green on the mock: mode line, llm line and real in=/out= on the step line', async () => {
+test('AWK_LLM=mock runs an LLM step green on the mock: mode line, llm line and real in=/out= on the step line', async () => {
   const run = await cli(['--pipeline', fixture('ask')]);
   assert.equal(run.code, 0, run.stderr);
   assert.match(run.stdout, /^run \S+ ok: cli-ask, 1 step\n$/);
-  assert.match(run.stderr, /info llm mode mode=mock reason="ANTHROPIC_API_KEY not set"/);
+  assert.match(run.stderr, /info llm mode mode=mock reason="AWK_LLM=mock"/);
   assert.match(run.stderr, /info llm model=mock ms=0 in=11 out=3 stop=end_turn/);
   assert.match(run.stderr, /info step .* step=ask uses=ask status=done attempt=1 ms=\d+ in=11 out=3/);
 });
@@ -250,12 +252,12 @@ async function stubApi(): Promise<{ server: Server; url: string; bodies: StubReq
   return { server, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, bodies };
 }
 
-test('with ANTHROPIC_API_KEY the real SDK is called: the request carries the env model, and a 401 fails the step after one attempt', async () => {
+test('AWK_LLM=anthropic calls the real SDK: the request carries the env model, and a 401 fails the step after one attempt', async () => {
   const api = await stubApi();
   try {
-    const ok = await cli(['--pipeline', fixture('ask')], undefined, { ANTHROPIC_API_KEY: 'good', ANTHROPIC_BASE_URL: api.url, ANTHROPIC_MODEL: 'claude-opus-5' });
+    const ok = await cli(['--pipeline', fixture('ask')], undefined, { AWK_LLM: 'anthropic', ANTHROPIC_API_KEY: 'good', ANTHROPIC_BASE_URL: api.url, ANTHROPIC_MODEL: 'claude-opus-5' });
     assert.equal(ok.code, 0, ok.stderr);
-    assert.match(ok.stderr, /info llm mode mode=anthropic model=claude-opus-5/);
+    assert.match(ok.stderr, /info llm mode mode=anthropic reason="AWK_LLM=anthropic" model=claude-opus-5/);
     assert.match(ok.stderr, /info llm model=claude-opus-5 ms=\d+ in=21 out=4 stop=end_turn/);
     assert.match(ok.stderr, /info step .* step=ask uses=ask status=done attempt=1 ms=\d+ in=21 out=4/);
     assert.deepEqual(api.bodies, [{
@@ -264,12 +266,79 @@ test('with ANTHROPIC_API_KEY the real SDK is called: the request carries the env
         messages: [{ role: 'user', content: 'What is six times seven?' }],
       },
     }]);
-    const denied = await cli(['--pipeline', fixture('ask')], undefined, { ANTHROPIC_API_KEY: 'bad', ANTHROPIC_BASE_URL: api.url });
+    const denied = await cli(['--pipeline', fixture('ask')], undefined, { AWK_LLM: 'anthropic', ANTHROPIC_API_KEY: 'bad', ANTHROPIC_BASE_URL: api.url });
     assert.equal(denied.code, 1);
-    assert.match(denied.stderr, /info llm mode mode=anthropic model=claude-sonnet-5/);
+    assert.match(denied.stderr, /info llm mode mode=anthropic reason="AWK_LLM=anthropic" model=claude-sonnet-5/);
     assert.match(denied.stderr, /^error: run \S+ failed at step "ask" \(ask\) after 1 attempt: anthropic: 401 .*invalid x-api-key/m);
     assert.equal(api.bodies.length, 2);
   } finally {
     await new Promise<void>((resolve) => api.server.close(() => resolve()));
   }
+});
+
+test('an AWK_LLM value that is not a mode exits 2 naming it, before any step runs', async () => {
+  const run = await cli(['--pipeline', fixture('ask')], undefined, { AWK_LLM: 'openai' });
+  assert.equal(run.code, 2);
+  assert.equal(run.stdout, '');
+  assert.equal(run.stderr, 'error: AWK_LLM="openai" is not a mode: expected one of claude-code, anthropic, mock\n');
+});
+
+test('AWK_LLM=claude-code with no claude on PATH exits 2 saying so, before any step runs', async () => {
+  // A PATH of one empty directory: the child itself needs no PATH lookup, being spawned by absolute path
+  // (process.execPath), so nothing but the `claude` probe is affected.
+  const empty = await mkdtemp(path.join(tmpdir(), 'awk-empty-path-'));
+  tempDirs.push(empty);
+  const run = await cli(['--pipeline', fixture('ask')], undefined, { AWK_LLM: 'claude-code', PATH: empty });
+  assert.equal(run.code, 2);
+  assert.equal(run.stdout, '');
+  assert.equal(run.stderr, 'error: AWK_LLM=claude-code but no executable `claude` on PATH: install the Claude Code CLI or set AWK_LLM=anthropic|mock\n');
+});
+
+/** A stand-in for the Claude Code CLI: a `claude` shell script first on PATH that records its argv and stdin to files
+ * beside it and prints the canned result JSON in `$AWK_FAKE_CLAUDE_RESULT`, exiting with `$AWK_FAKE_CLAUDE_EXIT`. */
+async function fakeClaude(): Promise<{ bin: string; argv: () => Promise<string[]>; stdin: () => Promise<string> }> {
+  const bin = await mkdtemp(path.join(tmpdir(), 'awk-fake-claude-'));
+  tempDirs.push(bin);
+  const script = `#!/bin/sh
+: > "$0.argv"
+for a in "$@"; do printf '%s\\n' "$a" >> "$0.argv"; done
+cat > "$0.stdin"
+printf '%s' "$AWK_FAKE_CLAUDE_RESULT"
+exit "\${AWK_FAKE_CLAUDE_EXIT:-0}"
+`;
+  await writeFile(path.join(bin, 'claude'), script, { mode: 0o755 });
+  const read = (suffix: string) => readFile(path.join(bin, `claude${suffix}`), 'utf8');
+  return { bin, argv: async () => (await read('.argv')).split('\n').slice(0, -1), stdin: () => read('.stdin') };
+}
+
+const canned = (overrides: Record<string, unknown> = {}): string => JSON.stringify({
+  type: 'result', subtype: 'success', is_error: false, stop_reason: 'end_turn', api_error_status: null, total_cost_usd: 0.0028,
+  usage: { input_tokens: 880, output_tokens: 7, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }, result: 'FORTY-TWO',
+  ...overrides,
+});
+
+test('AWK_LLM=claude-code spawns `claude` from PATH: headless flags, the env model, the system prompt as a flag, the prompt on stdin', async () => {
+  const fake = await fakeClaude();
+  const env = { AWK_LLM: 'claude-code', PATH: `${fake.bin}${path.delimiter}${process.env.PATH ?? ''}`, ANTHROPIC_MODEL: 'claude-opus-5', AWK_FAKE_CLAUDE_RESULT: canned() };
+  const run = await cli(['--pipeline', fixture('ask')], undefined, env);
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stdout, /^run \S+ ok: cli-ask, 1 step\n$/);
+  assert.match(run.stderr, /info llm mode mode=claude-code reason="AWK_LLM=claude-code" model=claude-opus-5/);
+  assert.match(run.stderr, /info llm model=claude-opus-5 ms=\d+ in=880 out=7 stop=end_turn cost=0\.0028/);
+  assert.match(run.stderr, /info step .* step=ask uses=ask status=done attempt=1 ms=\d+ in=880 out=7/);
+  assert.deepEqual(await fake.argv(), [
+    '-p', '--output-format', 'json', '--model', 'claude-opus-5', '--tools', '', '--max-turns', '1',
+    '--no-session-persistence', '--safe-mode', '--strict-mcp-config', '--system-prompt', 'Answer in one word.',
+  ]);
+  assert.equal(await fake.stdin(), 'What is six times seven?');
+});
+
+test('unset AWK_LLM with no key picks claude-code when `claude` is on PATH; a CLI API-status error fails the step after one attempt', async () => {
+  const fake = await fakeClaude();
+  const result = canned({ is_error: true, api_error_status: 404, result: "There's an issue with the selected model (claude-sonnet-5).", total_cost_usd: 0 });
+  const env = { AWK_LLM: '', PATH: `${fake.bin}${path.delimiter}${process.env.PATH ?? ''}`, AWK_FAKE_CLAUDE_RESULT: result, AWK_FAKE_CLAUDE_EXIT: '1' };
+  const run = await cli(['--pipeline', fixture('ask')], undefined, env);
+  assert.equal(run.code, 1);
+  assert.match(run.stderr, /info llm mode mode=claude-code reason="claude on PATH" model=claude-sonnet-5/);
+  assert.match(run.stderr, /^error: run \S+ failed at step "ask" \(ask\) after 1 attempt: claude-code: exit 1, api status 404: There's an issue with the selected model \(claude-sonnet-5\)\.\n$/m);
 });
