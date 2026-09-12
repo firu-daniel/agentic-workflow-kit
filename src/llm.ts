@@ -44,8 +44,9 @@ export interface AnthropicLlmOptions {
 }
 
 /** Statuses the SDK already retried; after its retries a step-level retry, with a longer wait, can still succeed.
- * Every other status (400, 401, 403, 404, 413, 422) means the same request would fail the same way. */
-const isRetryableStatus = (status: number): boolean => status === 408 || status === 409 || status === 429 || status >= 500;
+ * Every other status (400, 401, 403, 404, 413, 422) means the same request would fail the same way. The one HTTP
+ * classification in the kit: the `fetchPages` and `emit` steps read it too, so a status means the same everywhere. */
+export const isRetryableStatus = (status: number): boolean => status === 408 || status === 409 || status === 429 || status >= 500;
 
 /** Both stop reasons cut the answer short: the output cap, and the model running out of context window. Shared by the
  * two real backends, which name them identically. */

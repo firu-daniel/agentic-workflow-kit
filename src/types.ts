@@ -54,8 +54,8 @@ export interface LlmRequest {
 export interface LlmResponse {
   text: string;
   usage: TokenUsage;
-  /** The model stopped at `maxTokens` or at the context window: `text` is incomplete. A step's verify rule decides
-   * whether that fails it. */
+  /** The model stopped at `maxTokens` or at the context window: `text` is incomplete. The step decides what that
+   * means — the library's LLM steps throw NonRetryableError, a retry at the same cap being cut the same way. */
   truncated: boolean;
 }
 
