@@ -1,9 +1,9 @@
 // Deterministic verify rules, attached to the step whose output they check (`verify: [...]` in the pipeline) so a
 // failure retries that step with the exact failure text — code decides before any model judges. Each factory returns a
-// `VerifyRule`; `noFabricatedUrls` and `matchesSchema` read other steps' outputs through the context.
+// `VerifyRule`; `noFabricatedUrls`, `noFabricatedEmails` and `matchesSchema` read other steps' outputs through the context.
 import { validate, type Schema } from './schema.js';
 import { hasHeading } from './plan.js';
-import { asText, readInputs, urlsIn, type From } from './shared.js';
+import { asText, bareUrl, emailsIn, readInputs, urlsIn, type From } from './shared.js';
 import type { VerifyRule } from '../types.js';
 
 const textOf = (output: unknown): string => asText(output);
@@ -29,15 +29,23 @@ export const requiredSections = (titles: string[]): VerifyRule => (output) => {
 /** Every URL in the output appears in the outputs of the steps named (fetched pages, an extract's data): a URL the
  * model made up is a failure naming it. `allow` adds URLs that are fine to cite without a source (the site's own).
  * A named step that is not an earlier one would leave the corpus empty and fail every URL, so it is a
- * NonRetryableError naming the id (`readInputs`), as it is in the steps. */
+ * NonRetryableError naming the id (`readInputs`), as it is in the steps. Scheme-less citations count and compare
+ * equal to the full form, so a bare `businessinsider.com` does not get past the rule. */
 export const noFabricatedUrls = (from: From, allow: string[] = []): VerifyRule => (output, ctx) => {
   const corpus = readInputs(ctx, from).map(({ value }) => textOf(value)).join('\n');
-  const known = new Set([...urlsIn(corpus), ...allow].map(normalize));
-  return urlsIn(textOf(output)).flatMap((url) => (known.has(normalize(url)) ? [] : [`URL not in the sources: ${url}`]));
+  const known = new Set([...urlsIn(corpus), ...allow].map(bareUrl));
+  return urlsIn(textOf(output)).flatMap((url) => (known.has(bareUrl(url)) ? [] : [`URL not in the sources: ${url}`]));
+};
+
+/** Every email address in the output appears in the outputs of the steps named: one the model made up — the machine's
+ * own account address, which a CLI backend puts in the context — is a failure naming it. `allow` adds addresses that
+ * are fine to write without a source. Compared case-insensitively; a named step that is not an earlier one is a
+ * NonRetryableError, as in `noFabricatedUrls`. */
+export const noFabricatedEmails = (from: From, allow: string[] = []): VerifyRule => (output, ctx) => {
+  const corpus = readInputs(ctx, from).map(({ value }) => textOf(value)).join('\n');
+  const known = new Set([...emailsIn(corpus), ...allow].map((e) => e.toLowerCase()));
+  return emailsIn(textOf(output)).flatMap((e) => (known.has(e.toLowerCase()) ? [] : [`email not in the sources: ${e}`]));
 };
 
 /** The output validates against the schema (the `extract` step applies its own schema; this is for any other step). */
 export const matchesSchema = (schema: Schema): VerifyRule => (output) => validate(schema, output);
-
-/** A trailing slash, and nothing else, is ignored when comparing URLs. */
-const normalize = (url: string): string => url.replace(/\/+$/, '');

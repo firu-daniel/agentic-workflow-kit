@@ -17,7 +17,8 @@ export interface PlanParams {
 
 export const PLAN_SYSTEM_PROMPT =
   'You plan written pieces. Answer with a markdown outline only: one "## " heading per section, bullet points under each '
-  + 'naming the point to make and the source it comes from. No preamble, no draft prose.';
+  + 'naming the point to make and the source it comes from. No preamble, no draft prose. Use no contact details '
+  + '(email address, phone number, social handle) that do not appear in the sources.';
 
 export const plan: Step<PlanParams, string> = {
   name: 'plan',

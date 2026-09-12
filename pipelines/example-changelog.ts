@@ -4,7 +4,7 @@
 // without those variables it fetches the GitHub API and calls whichever LLM mode the environment selects. `publish`
 // is gated: the run stops before it with runs/example-changelog.review.md until the command is re-run with --approve.
 import { step, type Pipeline } from '../src/types.js';
-import { draft, emit, extract, fetchPages, minLength, noFabricatedUrls, plan, type Schema } from '../src/steps/index.js';
+import { draft, emit, extract, fetchPages, minLength, noFabricatedEmails, noFabricatedUrls, plan, type Schema } from '../src/steps/index.js';
 
 const RELEASES_URL = 'https://api.github.com/repos/nodejs/node/releases?per_page=3';
 const SECTIONS = ['Summary', 'Highlights', 'Links'];
@@ -65,7 +65,7 @@ const pipeline: Pipeline = {
         sections: SECTIONS,
       },
       // The fetched page only: `extract` is told to copy each URL verbatim, so its output cannot widen the corpus.
-      verify: [minLength(600), noFabricatedUrls(['releases'])],
+      verify: [minLength(600), noFabricatedUrls(['releases']), noFabricatedEmails(['releases'])],
     }),
     step({
       id: 'publish',

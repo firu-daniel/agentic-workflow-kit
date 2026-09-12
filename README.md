@@ -17,7 +17,7 @@ AWK_OFFLINE=1 AWK_LLM=mock npm run start -- --pipeline example-changelog --appro
 npm run start -- --pipeline example-changelog                                        # the same against GitHub and the selected LLM
 npm run start -- --pipeline smoke --dry-run                                          # the plan for a run; no step is called
 npm run start -- --pipeline smoke --fresh                                            # discard the checkpoint, run every step again
-npm test                                                                             # 121 tests, offline
+npm test                                                                             # 125 tests, offline
 npm run typecheck                                                                    # tsc --noEmit
 ```
 
@@ -36,7 +36,7 @@ are the whole library (`src/steps/`):
 
 | Step | Does | Fails verify when |
 |---|---|---|
-| `fetchPages` | HTTP GET each URL, HTML → text (title kept); a per-URL fixture file stands in when the request cannot succeed on a retry (no network, a timeout, a status outside 429/5xx/408/409), and replaces it under `AWK_OFFLINE=1` | a page is empty |
+| `fetchPages` | HTTP GET each URL, HTML → text (title kept, an absolute `<a href>` kept after its text as `text (url)`); a per-URL fixture file stands in when the request cannot succeed on a retry (no network, a timeout, a status outside 429/5xx/408/409), and replaces it under `AWK_OFFLINE=1` | a page is empty |
 | `extract` | one LLM call → JSON matching a small JSON-schema subset (`src/steps/schema.ts`) | the answer is not JSON, or violates the schema (each violation by path) |
 | `plan` | one LLM call → a markdown outline with the requested `## ` sections | the output is empty, or a requested section has no heading (any level) |
 | `draft` | one LLM call → the markdown piece, from whichever earlier steps its `from` names | the output is empty, or a requested section has no heading (any level) |
@@ -44,10 +44,13 @@ are the whole library (`src/steps/`):
 
 Pipeline-level rules attach to the step whose output they check: `minLength(n)`, `maxLength(n)`,
 `requiredSections([...])`, `noFabricatedUrls(from, allow?)` (every URL in the output must appear in the named
-steps' outputs, or in `allow`) and `matchesSchema(schema)`. The demo checks the draft's URLs against the fetched
-pages rather than the extract that named them, so no step between page and post can widen the corpus. A step's
-own `verify` runs first, then the pipeline's rules; any failure string fails the attempt, and the next attempt
-receives those strings as its correction.
+steps' outputs, or in `allow`; scheme-less citations count and compare equal to the full form, so a bare
+`businessinsider.com` cannot game it), `noFabricatedEmails(from, allow?)` (the same for email addresses, which keeps
+the machine's own account address — a CLI backend puts it in the context — out of the piece) and
+`matchesSchema(schema)`. The demo checks the draft's URLs and addresses against the fetched pages rather than the
+extract that named them, so no step between page and post can widen the corpus. A step's own `verify` runs first,
+then the pipeline's rules; any failure string fails the attempt, and the next attempt receives those strings as its
+correction.
 
 A pipeline is `pipelines/<name>.ts` with a default export of `{ name, steps }` (see `src/types.ts`); each step
 names the earlier steps it reads through its `from` param. `pipelines/smoke.ts` is the three-step, no-LLM

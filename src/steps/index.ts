@@ -6,6 +6,6 @@ export { extract, parseJson, type ExtractParams } from './extract.js';
 export { plan, hasHeading, type PlanParams } from './plan.js';
 export { draft, type DraftParams } from './draft.js';
 export { emit, emitWith, type EmitParams, type EmitOutput } from './emit.js';
-export { minLength, maxLength, requiredSections, noFabricatedUrls, matchesSchema } from './verify.js';
+export { minLength, maxLength, requiredSections, noFabricatedUrls, noFabricatedEmails, matchesSchema } from './verify.js';
 export { validate, example, type Schema } from './schema.js';
-export { urlsIn, type From } from './shared.js';
+export { urlsIn, emailsIn, type From } from './shared.js';

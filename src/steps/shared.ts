@@ -45,14 +45,34 @@ export function correctionBlock(ctx: StepContext): string {
 }
 
 /** URLs in a text, trailing punctuation, markdown emphasis and closing brackets stripped, in order of first
- * appearance, unique. `**https://a.io/x**` is the URL, not a fabricated one. */
+ * appearance, unique. `**https://a.io/x**` is the URL, not a fabricated one. A scheme-less `domain.tld[/path]`
+ * counts too, so a bare `businessinsider.com` cannot satisfy a citation rule the scheme-only form would have failed;
+ * the cost is that a dotted word that is not a domain (`node.js`) matches as well, which only ever asks for a source.
+ * An address after `@` is an email, not a URL. */
 export function urlsIn(text: string): string[] {
   const seen = new Set<string>();
-  for (const match of text.match(/https?:\/\/[^\s<>"'`)\]]+/g) ?? []) {
+  for (const match of text.match(URL_RE) ?? []) {
     seen.add(match.replace(/[.,;:!?*_]+$/, ''));
   }
   return [...seen];
 }
+
+const URL_RE = /https?:\/\/[^\s<>"'`)\]]+|(?<![\w@.\-/])(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s<>"'`)\]]*)?(?![\w.%+-]*@)/gi;
+
+/** Email addresses in a text, markdown emphasis and trailing punctuation stripped, in order of first appearance,
+ * unique. `_a@b.co_` is the address, not a fabricated one. */
+export function emailsIn(text: string): string[] {
+  const seen = new Set<string>();
+  for (const match of text.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi) ?? []) {
+    seen.add(match.replace(/^[*_]+/, '').replace(/[.,;:!?*_]+$/, ''));
+  }
+  return [...seen];
+}
+
+/** A URL as it is compared: the scheme and a trailing slash off, the host folded, so a scheme-less citation
+ * (`a.io/X`) and the source that carries it (`https://A.io/X/`) are one URL. The path keeps its case. */
+export const bareUrl = (url: string): string =>
+  url.replace(/^https?:\/\//i, '').replace(/^[^/]+/, (host) => host.toLowerCase()).replace(/\/+$/, '');
 
 /** A response cut at the output cap. A retry at the same cap is cut the same way (src/types.ts), and a half-written
  * answer must not reach verify as if it were whole, so the run stops here. */

@@ -22,7 +22,8 @@ export const EXTRACT_SYSTEM_PROMPT =
   'You extract structured data from the sources you are given. Answer with one JSON value only, no prose, no code fence. '
   + 'Use only facts present in the sources. Leave a property out only when the schema does not require it; when a '
   + 'required property has no supporting fact, give the empty value its type allows — "" for a string, [] for an '
-  + 'array, 0 for a number — so the answer still matches the schema.';
+  + 'array, 0 for a number — so the answer still matches the schema. Use no contact details (email address, phone '
+  + 'number, social handle) that do not appear in the sources.';
 
 export const extract: Step<ExtractParams, unknown> = {
   name: 'extract',

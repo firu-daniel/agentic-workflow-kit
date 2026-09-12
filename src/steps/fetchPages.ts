@@ -7,6 +7,7 @@
 import { readFile } from 'node:fs/promises';
 import { isRetryableStatus } from '../llm.js';
 import { errorText } from '../log.js';
+import { bareUrl } from './shared.js';
 import { NonRetryableError } from '../types.js';
 import type { Step } from '../types.js';
 
@@ -115,11 +116,13 @@ function toPage(url: string, body: string, contentType: string, maxChars: number
 
 /** The head (title included), scripts, styles and tags dropped; block-level tags become line breaks; the common named
  * entities and all numeric references decoded; whitespace collapsed to single spaces within a line and at most one
- * blank line between blocks. Good enough for prose; tables flatten. */
+ * blank line between blocks. An `<a>` with an absolute http(s) target keeps it — `text (https://x.y/z)` — so a later
+ * step can cite the page's links instead of inventing them. Good enough for prose; tables flatten. */
 export function htmlToText(html: string): string {
   const text = html
     .replace(/<!--[\s\S]*?-->/g, ' ')
     .replace(/<(head|script|style|noscript|template|svg|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ')
+    .replace(/<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi, keepLinkTarget)
     .replace(/<\/?(p|div|br|li|ul|ol|h[1-6]|tr|td|th|table|section|article|header|footer|nav|blockquote|pre|dd|dt|dl|hr)\b[^>]*>/gi, '\n')
     .replace(/<[^>]+>/g, ' ');
   return decodeEntities(text)
@@ -128,6 +131,18 @@ export function htmlToText(html: string): string {
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+/** `<a href="https://x.y/z">text</a>` → `text (https://x.y/z)`. A relative, protocol-relative (`//host/path`), `#`,
+ * `javascript:`, `mailto:` or `tel:` target is dropped, and so is one the anchor text already spells out (compared as
+ * `verify` compares URLs, so `x.io/z` and `https://x.io/z/` do not double). The attribute name is anchored, or a
+ * `data-href` would win over the real target. */
+function keepLinkTarget(_match: string, attrs: string, inner: string): string {
+  const quoted = /(?:^|[\s"'])href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i.exec(attrs);
+  const href = decodeEntities(quoted?.slice(1).find((v) => v !== undefined) ?? '').trim();
+  if (!/^https?:\/\//i.test(href)) return inner;
+  const text = decodeEntities(inner.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+  return bareUrl(text) === bareUrl(href) ? inner : `${inner} (${href})`;
 }
 
 /** The named entities worth a table; every other one (`&rsquo;`, `&times;`) survives literally. */

@@ -21,7 +21,8 @@ export interface DraftParams {
 
 export const DRAFT_SYSTEM_PROMPT =
   'You write publication-ready markdown from the sources you are given. Answer with the piece only, no preamble, '
-  + 'no commentary. Cite only URLs that appear in the sources; invent none.';
+  + 'no commentary. Cite only URLs that appear in the sources; invent none. Use no contact details (email address, '
+  + 'phone number, social handle) that do not appear in the sources.';
 
 export const draft: Step<DraftParams, string> = {
   name: 'draft',

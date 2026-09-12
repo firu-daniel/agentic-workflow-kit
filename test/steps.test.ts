@@ -11,7 +11,7 @@ import example from '../pipelines/example-changelog.js';
 import { createLogger } from '../src/log.js';
 import { mockLlm } from '../src/llm.js';
 import { runPipeline } from '../src/runner.js';
-import { draft, emitWith, example as exampleOf, extract, fetchPagesWith, hasHeading, htmlToText, matchesSchema, maxLength, minLength, noFabricatedUrls, parseJson, plan, requiredSections, urlsIn, validate, type Schema } from '../src/steps/index.js';
+import { draft, emailsIn, emitWith, example as exampleOf, extract, fetchPagesWith, hasHeading, htmlToText, matchesSchema, maxLength, minLength, noFabricatedEmails, noFabricatedUrls, parseJson, plan, requiredSections, urlsIn, validate, type Schema } from '../src/steps/index.js';
 import { DEFAULT_INPUT_CHARS, renderInputs } from '../src/steps/shared.js';
 import { NonRetryableError, type LlmClient, type LlmRequest, type StepContext } from '../src/types.js';
 
@@ -71,6 +71,21 @@ test('urlsIn finds unique URLs in order and strips trailing punctuation, emphasi
   assert.deepEqual(urlsIn('see https://a.io/x, then (https://b.io/y). Again https://a.io/x! and "https://c.io/z"'), ['https://a.io/x', 'https://b.io/y', 'https://c.io/z']);
   assert.deepEqual(urlsIn('bold **https://a.io/x** and _https://b.io/y_'), ['https://a.io/x', 'https://b.io/y']);
   assert.deepEqual(urlsIn('no links'), []);
+});
+
+test('urlsIn also finds scheme-less URLs, once each and not inside a full URL or an email address', () => {
+  assert.deepEqual(urlsIn('per businessinsider.com and example.org/a/b.'), ['businessinsider.com', 'example.org/a/b']);
+  assert.deepEqual(urlsIn('https://a.io/x then a.io/x'), ['https://a.io/x', 'a.io/x'], 'the host inside a full URL is not a second match');
+  assert.deepEqual(urlsIn('write to sam@a.io about it'), [], 'an address after @ is an email, not a URL');
+  assert.deepEqual(urlsIn('write to first.last@corp.com about it'), [], 'a dotted local part is part of the address, not a URL');
+  assert.deepEqual(urlsIn('bold **b.io/y**'), ['b.io/y']);
+  assert.deepEqual(urlsIn('run node.js'), ['node.js'], 'a dotted word that is not a domain matches too — the documented cost');
+});
+
+test('emailsIn finds unique addresses in order of first appearance', () => {
+  assert.deepEqual(emailsIn('mail a.b+1@x.co, then B@Y.IO. Again a.b+1@x.co!'), ['a.b+1@x.co', 'B@Y.IO']);
+  assert.deepEqual(emailsIn('italic _a@b.co_ and first.last@corp.com'), ['a@b.co', 'first.last@corp.com'], 'markdown emphasis is not part of the address');
+  assert.deepEqual(emailsIn('no addresses here'), []);
 });
 
 test('renderInputs blocks each input by id, JSON-encodes the rest and clips at maxChars with a marker', () => {
@@ -152,8 +167,21 @@ test('a pattern that does not compile is non-retryable in validate and in exampl
 // --- fetchPages ----------------------------------------------------------------------------------------------------
 
 test('htmlToText drops scripts, styles and tags, breaks on block tags, decodes entities and collapses whitespace', () => {
-  const html = '<html><head><title>T &amp; U</title><style>p{}</style><script>x<y</script></head><body><h1>Hi</h1>\n\n\n<p>one &lt;two&gt;&nbsp;&#65;&#x42;</p><ul><li>a</li><li>b</li></ul><!-- c --><span>tail</span></body></html>';
-  assert.equal(htmlToText(html), 'Hi\n\none <two> AB\n\na\n\nb\n\ntail');
+  const html = '<html><head><title>T &amp; U</title><style>p{}</style><script>x<y</script></head><body><h1>Hi</h1>\n\n\n<p>one &lt;two&gt;&nbsp;&#65;&#x42;</p><ul><li>a</li><li>b</li></ul><!-- c --><a href="https://x.io/z">link</a> <span>tail</span></body></html>';
+  assert.equal(htmlToText(html), 'Hi\n\none <two> AB\n\na\n\nb\n\nlink (https://x.io/z) tail');
+});
+
+test('htmlToText keeps an absolute link target after its text, skips the other href kinds and never doubles a URL', () => {
+  assert.equal(htmlToText('<p><a href="https://x.io/z">read <b>this</b></a></p>'), 'read this (https://x.io/z)');
+  assert.equal(htmlToText('<p><a href=\'https://x.io/a?p=1&amp;q=2\'>q</a></p>'), 'q (https://x.io/a?p=1&q=2)');
+  assert.equal(htmlToText('<p><a href=https://x.io/u>u</a></p>'), 'u (https://x.io/u)');
+  assert.equal(htmlToText('<p><a href="https://x.io/z">https://x.io/z</a></p>'), 'https://x.io/z', 'the anchor text already is the URL');
+  assert.equal(htmlToText('<p><a href="https://x.io/z">x.io/z/</a></p>'), 'x.io/z/', 'the same URL, scheme and trailing slash aside');
+  assert.equal(htmlToText('<P><A HREF="https://x.io/Z">up</A></P>'), 'up (https://x.io/Z)');
+  assert.equal(htmlToText('<p><a class="c" href="https://x.io/z" rel="nofollow">both sides</a></p>'), 'both sides (https://x.io/z)');
+  assert.equal(htmlToText('<p><a data-href="https://tracker.evil/x" href="https://real.io/y">t</a></p>'), 't (https://real.io/y)', 'a data-href decoy is not the target');
+  const skipped = '<p><a href="/rel">a</a> <a href="#top">b</a> <a href="javascript:x()">c</a> <a href="mailto:s@x.io">d</a> <a href="tel:+1">e</a> <a>f</a></p>';
+  assert.equal(htmlToText(skipped), 'a b c d e f');
 });
 
 test('fetchPages GETs each URL with the user agent and headers, reduces HTML to text with the title, keeps other bodies as they are, and caps the text', async () => {
@@ -325,16 +353,32 @@ test('minLength / maxLength / requiredSections / matchesSchema report in words a
   assert.deepEqual(await matchesSchema({ type: 'array', items: { type: 'string' } })(['x', 1], c), ['$[1]: expected a string, got number']);
 });
 
-test('noFabricatedUrls accepts URLs found in the named inputs or the allow list (trailing slash ignored) and names every other one', async () => {
+test('noFabricatedUrls accepts URLs found in the named inputs or the allow list (scheme and trailing slash ignored) and names every other one', async () => {
   const c = ctx({}, { pages: [{ url: 'https://a.io/p/', text: 'see https://b.io/q.' }], facts: { link: 'https://c.io/r' } });
   const rule = noFabricatedUrls(['pages', 'facts'], ['https://ok.io']);
   assert.deepEqual(await rule('Links: https://a.io/p, https://b.io/q, https://c.io/r/, https://ok.io/', c), []);
+  assert.deepEqual(await rule('Links: a.io/p and http://b.io/q/', c), [], 'a scheme-less or http citation of an https source is the same URL');
+  assert.deepEqual(await rule('Links: https://A.IO/p', c), [], 'the host is compared case-insensitively');
   assert.deepEqual(await rule('See https://a.io/other and https://made.up/x.', c), ['URL not in the sources: https://a.io/other', 'URL not in the sources: https://made.up/x']);
+  assert.deepEqual(await rule('Per businessinsider.com.', c), ['URL not in the sources: businessinsider.com'], 'a bare domain does not get past the rule');
   assert.deepEqual(await noFabricatedUrls('pages')('no links', c), []);
   assert.throws(
     () => noFabricatedUrls(['pagez'])('see https://a.io/x', c),
     (err: unknown) => err instanceof NonRetryableError && /input "pagez" is not the output of an earlier step/.test(err.message),
     'a step id that is not an input would flag every URL, so it fails the run instead',
+  );
+});
+
+test('noFabricatedEmails accepts addresses found in the named inputs or the allow list (case ignored) and names every other one', async () => {
+  const c = ctx({}, { pages: [{ url: 'https://a.io/p', text: 'write to Sam@a.io.' }], facts: { contact: 'ops@b.io' } });
+  const rule = noFabricatedEmails(['pages', 'facts'], ['desk@ok.io']);
+  assert.deepEqual(await rule('Contact sam@A.IO, ops@b.io or DESK@ok.io.', c), []);
+  assert.deepEqual(await rule('Booking: me@laptop.local and other@c.io.', c), ['email not in the sources: me@laptop.local', 'email not in the sources: other@c.io']);
+  assert.deepEqual(await noFabricatedEmails('pages')('no addresses', c), []);
+  assert.throws(
+    () => noFabricatedEmails(['pagez'])('mail x@y.io', c),
+    (err: unknown) => err instanceof NonRetryableError && /input "pagez" is not the output of an earlier step/.test(err.message),
+    'a step id that is not an input would flag every address, so it fails the run instead',
   );
 });
 
