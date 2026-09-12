@@ -1,7 +1,7 @@
 // The command behind `npm run start`: parses the flags, loads `pipelines/<name>.ts` (or a path to a pipeline file),
 // checks that its default export has the Pipeline shape, and hands it to the runner with the flags and the LLM slot
-// (a stub that stops the run until src/llm.ts lands). src/index.ts binds `main` to the process; everything here is
-// importable so the tests can drive the pieces without spawning one.
+// (src/llm.ts picks the Anthropic client or the offline mock from the environment). src/index.ts binds `main` to the
+// process; everything here is importable so the tests can drive the pieces without spawning one.
 // Exit codes: 0 a completed run, a dry run or --help; 1 a step failed after its retries (the step id is in the
 // message) or the run threw; 2 a usage error, or a pipeline file that cannot be found, cannot be loaded, or lacks a
 // required field (the path and the field are named). Log lines go to stderr; the plan and the summary to stdout.
@@ -9,10 +9,10 @@ import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { errorText } from './log.js';
+import { createLlm } from './llm.js';
+import { createLogger, errorText } from './log.js';
 import { runPipeline } from './runner.js';
-import { NonRetryableError } from './types.js';
-import type { LlmClient, Pipeline, RunFlags, RunResult } from './types.js';
+import type { Pipeline, RunFlags, RunResult } from './types.js';
 
 export const USAGE = `Usage: npm run start -- --pipeline <name> [--dry-run] [--approve] [--fresh]
 
@@ -22,6 +22,10 @@ export const USAGE = `Usage: npm run start -- --pipeline <name> [--dry-run] [--a
   --approve          let gated steps run (gates are parsed but not enforced yet; that lands with the approval gate)
   --fresh            delete the pipeline's checkpoint first, so every step runs again
   --help, -h         this text
+
+Environment: with ANTHROPIC_API_KEY set, steps that call the LLM reach the Anthropic API (model from ANTHROPIC_MODEL,
+default claude-sonnet-5, and ANTHROPIC_BASE_URL honoured by the SDK, which is how the tests point it at a local stub);
+without it an offline mock answers every call, so a pipeline runs green with no key.
 
 Exit code 0: the run completed, or --dry-run / --help. 1: a step failed after its retries (the step id is in the
 message). 2: a usage error, or a pipeline file that cannot be found or loaded, or lacks a required field.
@@ -129,13 +133,6 @@ export function checkPipeline(value: unknown, file: string): Pipeline {
   return value as unknown as Pipeline;
 }
 
-/** The LLM slot until src/llm.ts lands: a step that calls it stops the run at once instead of retrying. */
-const noLlm: LlmClient = {
-  async complete() {
-    throw new NonRetryableError('no LLM client in this build yet (src/llm.ts); this step needs one');
-  },
-};
-
 /** Runs the command and returns the exit code; writes only to process.stdout / process.stderr. */
 export async function main(argv: readonly string[]): Promise<number> {
   let args: CliArgs;
@@ -160,9 +157,11 @@ export async function main(argv: readonly string[]): Promise<number> {
     process.stderr.write(`error: ${errorText(err)}\n`);
     return 2;
   }
+  // One logger for the run and the LLM client, so the `llm` lines interleave with the step lines on stderr.
+  const log = createLogger();
   let result: RunResult;
   try {
-    result = await runPipeline(pipeline, { flags: args.flags, llm: noLlm });
+    result = await runPipeline(pipeline, { flags: args.flags, llm: createLlm(process.env, log), log });
   } catch (err) {
     // The runner throws only outside a step: an unreadable checkpoint, or an output the checkpoint cannot serialize.
     process.stderr.write(`error: pipeline "${pipeline.name}": ${errorText(err)}\n`);

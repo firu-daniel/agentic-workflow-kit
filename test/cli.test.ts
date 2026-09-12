@@ -3,7 +3,9 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { createServer, type Server } from 'node:http';
 import { createRequire } from 'node:module';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
@@ -15,8 +17,11 @@ const fixture = (name: string): string => path.join(root, 'test', 'fixtures', `$
 
 /** Each child process runs in its own temp cwd so its runs/ never touches the repo's; a name still resolves to the
  * package's pipelines/ directory, a path is passed absolute. The child env is the parent's with Node startup warnings
- * off (a NODE_OPTIONS warning would land on the stderr the tests match exactly) and the resume fixture's variable
- * cleared, so an ambient AWK_TEST_PASS cannot make its first run succeed; `env` adds per-test overrides on top. */
+ * off (a NODE_OPTIONS warning would land on the stderr the tests match exactly), the resume fixture's variable
+ * cleared, so an ambient AWK_TEST_PASS cannot make its first run succeed, and ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN,
+ * ANTHROPIC_MODEL, ANTHROPIC_BASE_URL and ANTHROPIC_LOG cleared, so an ambient credential cannot put a run in real
+ * mode or reach the real API and ambient SDK debug output cannot land on the matched stdout; `env` adds per-test
+ * overrides on top. */
 const cwds: string[] = [];
 after(() => Promise.all(cwds.map((d) => rm(d, { recursive: true, force: true }))));
 const tsx = createRequire(import.meta.url).resolve('tsx/cli');
@@ -28,7 +33,7 @@ async function cli(
     cwds.push(cwd);
   }
   return new Promise((resolve) => {
-    execFile(process.execPath, [tsx, path.join(root, 'src', 'index.ts'), ...args], { cwd, env: { ...process.env, NODE_OPTIONS: '--no-warnings', AWK_TEST_PASS: '', ...env } }, (err, stdout, stderr) => {
+    execFile(process.execPath, [tsx, path.join(root, 'src', 'index.ts'), ...args], { cwd, env: { ...process.env, NODE_OPTIONS: '--no-warnings', AWK_TEST_PASS: '', ANTHROPIC_API_KEY: '', ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_MODEL: '', ANTHROPIC_BASE_URL: '', ANTHROPIC_LOG: '', ...env } }, (err, stdout, stderr) => {
       const code = err && typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : err ? -1 : 0;
       resolve({ code, stdout, stderr, cwd: cwd as string });
     });
@@ -195,4 +200,76 @@ test('a re-run resumes the checkpointed step: status=resumed on stderr, the resu
   assert.match(again.stderr, /info step .* step=seed uses=constant status=resumed/);
   assert.match(again.stdout, /^run \S+ ok: cli-resumable, 3 steps \(1 resumed\)\n$/);
   assert.deepEqual(await listRuns(first.cwd), []);
+});
+
+// --- the LLM slot, end to end --------------------------------------------------------------------------------------
+
+test('without ANTHROPIC_API_KEY an LLM step runs green on the mock: mode line, llm line and real in=/out= on the step line', async () => {
+  const run = await cli(['--pipeline', fixture('ask')]);
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stdout, /^run \S+ ok: cli-ask, 1 step\n$/);
+  assert.match(run.stderr, /info llm mode mode=mock reason="ANTHROPIC_API_KEY not set"/);
+  assert.match(run.stderr, /info llm model=mock ms=0 in=11 out=3 stop=end_turn/);
+  assert.match(run.stderr, /info step .* step=ask uses=ask status=done attempt=1 ms=\d+ in=11 out=3/);
+});
+
+/** A stand-in for api.anthropic.com: answers POST /v1/messages with a Messages-API body when the key is `good`, echoing
+ * the requested model, with the API's 401 body otherwise, and with a 400 body when the request is not JSON (an error an
+ * assertion can read, rather than a throw out of an http callback). The request is recorded with its metadata beside
+ * the parsed body, not merged into it. The real SDK talks to it through ANTHROPIC_BASE_URL. */
+interface StubRequest { url?: string; key?: string | string[]; body: Record<string, unknown> }
+async function stubApi(): Promise<{ server: Server; url: string; bodies: StubRequest[] }> {
+  const bodies: StubRequest[] = [];
+  const server = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', () => {
+      res.setHeader('content-type', 'application/json');
+      let body: Record<string, unknown>;
+      try {
+        body = JSON.parse(raw) as Record<string, unknown>;
+      } catch (err) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: `stub: body is not JSON: ${String(err)}` } }));
+        return;
+      }
+      bodies.push({ url: req.url, key: req.headers['x-api-key'], body });
+      if (req.headers['x-api-key'] !== 'good') {
+        res.statusCode = 401;
+        res.end(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } }));
+        return;
+      }
+      res.end(JSON.stringify({
+        id: 'msg_stub', type: 'message', role: 'assistant', model: body.model, container: null,
+        content: [{ type: 'text', text: 'FORTY-TWO', citations: null }], stop_reason: 'end_turn', stop_details: null, stop_sequence: null,
+        usage: { input_tokens: 21, output_tokens: 4, cache_creation_input_tokens: null, cache_read_input_tokens: null, cache_creation: null, inference_geo: null, output_tokens_details: null, server_tool_use: null, service_tier: null },
+      }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return { server, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, bodies };
+}
+
+test('with ANTHROPIC_API_KEY the real SDK is called: the request carries the env model, and a 401 fails the step after one attempt', async () => {
+  const api = await stubApi();
+  try {
+    const ok = await cli(['--pipeline', fixture('ask')], undefined, { ANTHROPIC_API_KEY: 'good', ANTHROPIC_BASE_URL: api.url, ANTHROPIC_MODEL: 'claude-opus-5' });
+    assert.equal(ok.code, 0, ok.stderr);
+    assert.match(ok.stderr, /info llm mode mode=anthropic model=claude-opus-5/);
+    assert.match(ok.stderr, /info llm model=claude-opus-5 ms=\d+ in=21 out=4 stop=end_turn/);
+    assert.match(ok.stderr, /info step .* step=ask uses=ask status=done attempt=1 ms=\d+ in=21 out=4/);
+    assert.deepEqual(api.bodies, [{
+      url: '/v1/messages', key: 'good', body: {
+        model: 'claude-opus-5', max_tokens: 64, system: 'Answer in one word.',
+        messages: [{ role: 'user', content: 'What is six times seven?' }],
+      },
+    }]);
+    const denied = await cli(['--pipeline', fixture('ask')], undefined, { ANTHROPIC_API_KEY: 'bad', ANTHROPIC_BASE_URL: api.url });
+    assert.equal(denied.code, 1);
+    assert.match(denied.stderr, /info llm mode mode=anthropic model=claude-sonnet-5/);
+    assert.match(denied.stderr, /^error: run \S+ failed at step "ask" \(ask\) after 1 attempt: anthropic: 401 .*invalid x-api-key/m);
+    assert.equal(api.bodies.length, 2);
+  } finally {
+    await new Promise<void>((resolve) => api.server.close(() => resolve()));
+  }
 });
