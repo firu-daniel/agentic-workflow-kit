@@ -14,6 +14,9 @@
   },
   "license": "MIT",
   "author": "Firu Daniel",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.125.0"
+  },
   "devDependencies": {
     "@types/node": "^20.19.0",
     "tsx": "^4.23.0",

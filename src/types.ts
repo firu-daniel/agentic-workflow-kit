@@ -26,7 +26,11 @@ export interface Logger {
   error(message: string, fields?: Record<string, unknown>): void;
 }
 
-/** The LLM slot steps see. Implemented in src/llm.ts (Anthropic client and MockLlm). */
+/** The LLM slot steps see: one completion per call, no conversation state. Implemented in src/llm.ts — the Anthropic
+ * client (ANTHROPIC_API_KEY set) or the offline mock (key absent); `createLlm` there picks one. An error a retry cannot
+ * fix (a bad request, a bad key, a refusal, an SDK error raised before any request was sent) is thrown as
+ * NonRetryableError; anything else (rate limit, timeout, 5xx, network, an SDK error marked retryable) is thrown as is,
+ * so the runner backs off and retries the step. */
 export interface LlmClient {
   complete(request: LlmRequest): Promise<LlmResponse>;
 }
@@ -34,12 +38,21 @@ export interface LlmClient {
 export interface LlmRequest {
   system?: string;
   prompt: string;
+  /** Output cap for this call; the client's default applies when absent. A response cut at the cap comes back with
+   * `truncated: true` rather than an error (a retry with the same cap would be cut the same way). */
   maxTokens?: number;
+  /** What the offline mock returns for this request, verbatim; the real client ignores it. A library step supplies
+   * one that satisfies its own verify rules (a schema-valid object, a draft with the required sections), so a pipeline
+   * runs green with no key. Without it the mock returns a canned text that names itself as a mock. */
+  mockReply?: string;
 }
 
 export interface LlmResponse {
   text: string;
   usage: TokenUsage;
+  /** The model stopped at `maxTokens` or at the context window: `text` is incomplete. A step's verify rule decides
+   * whether that fails it. */
+  truncated: boolean;
 }
 
 /** What a step receives on each attempt. */
