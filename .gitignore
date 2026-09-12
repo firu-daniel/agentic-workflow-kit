@@ -6,3 +6,6 @@ runs/*
 .checkpoint.json
 .env
 .DS_Store
+
+# Uncommitted pipelines and their fixtures (kept local on purpose)
+pipelines/local/
