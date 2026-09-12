@@ -31,6 +31,10 @@ environment, which the CLI prefers; a step's maxTokens does not apply, the CLI h
 point it at a local stub) or mock (an offline mock answers every call, so a pipeline runs green with no key). Unset,
 the mode follows what is available: ANTHROPIC_API_KEY set → anthropic, else claude on PATH → claude-code, else mock.
 Both real modes take the model from ANTHROPIC_MODEL (default claude-sonnet-5).
+AWK_OFFLINE=1 makes a fetchPages step read each URL's configured fixture file instead of requesting it (a URL with no
+fixture then fails), so a run needs no network. GITHUB_TOKEN lets an emit step with a "pr" param open the pull request
+(without it the PR is skipped and the written file is the deliverable), and GITHUB_API_URL points those GitHub calls
+elsewhere (default https://api.github.com).
 
 Exit code 0: the run completed, or --dry-run / --help. 1: a step failed after its retries (the step id is in the
 message). 2: a usage error (an unknown flag, an AWK_LLM value that is not a mode, or AWK_LLM=claude-code with no claude

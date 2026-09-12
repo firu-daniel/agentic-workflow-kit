@@ -1,0 +1,23 @@
+[
+  {
+    "tag_name": "v26.8.2",
+    "name": "2026-09-09, Version 26.8.2 (Current), @aduh95",
+    "published_at": "2026-09-09T16:07:48Z",
+    "html_url": "https://github.com/nodejs/node/releases/tag/v26.8.2",
+    "body": "\n\n\n### Notable Changes\n\n* \\[[`616bd3fa26`](https://github.com/nodejs/node/commit/616bd3fa26)] - **doc**: deprecate `Server.prototype._listen2` in `node:net` (Antoine du Hamel) [#65593](https://github.com/nodejs/node/pull/65593)\n* \\[[`ae1801eb55`](https://github.com/nodejs/node/commit/ae1801eb55)] - **meta**: refine the security vuln posture for experimental features (James M Snell) [#65438](https://github.com/nodejs/node/pull/65438)\n* \\[[`09feba74c8`](https://github.com/nodejs/node/commit/09feba74c8)] - **deps**: update Undici to 8.10.2 (Node.js GitHub Bot) [#65788](https://github.com/nodejs/node/pull/65788)\n* \\[[`7efdbe3eb9`](https://github.com/nodejs/node/commit/7efdbe3eb9)] - **deps**: update OpenSSL to 3.5.8 (Node.js GitHub Bot) [#65542](https://github.com/nodejs/node/pull/65542)\n\n### Commits\n\n* \\[[`d8aedd6584`](https://github.com/nodejs/node/commit/d8aedd6584)] - **build**: skip dockit on riscv64 (Stewart X Addison) [#62251](https://github.com/nodejs/node/pull/62251)\n* \\[[`1899c274eb`](https://github.com/nodejs/node/commit/1899c274eb)] - **build**: activate correct default flags for riscv64 (Stewart X Addison) [#65708](https://github.com/nodejs/node/pull/65708)\n* \\[[`ec8a3be996`](https://github.com/nodejs/node/commit/ec8a3be996)] - **build**: derive NODE\\_ARCH from target\\_cpu in the GN build (Shelley Vohr) [#65491](https://github.com/nodejs/node/pull/65491)\n* \\[[`b73118a507`](https://github.com/nodejs/node/commit/b73118a507)] - **build,win**: remove LTO parallelisation limit (Stefan Stojanovic) [#65535](https://github.com/nodejs/node/pull/65535)\n* \\[[`09feba74c8`](https://github.com/nodejs/node/commit/09feba74c8)] - **deps**: update undici to 8.10.2 (Node.js GitHub Bot) [#65788](https://github.com/nodejs/node/pull/65788)"
+  },
+  {
+    "tag_name": "v24.21.0",
+    "name": "2026-09-08, Version 24.21.0 'Krypton' (LTS), @aduh95",
+    "published_at": "2026-09-08T21:51:09Z",
+    "html_url": "https://github.com/nodejs/node/releases/tag/v24.21.0",
+    "body": "\n\n\n### Notable Changes\n\n* \\[[`71106e1f17`](https://github.com/nodejs/node/commit/71106e1f17)] - **crypto**: update root certificates to NSS 3.126 (Node.js GitHub Bot) [#65495](https://github.com/nodejs/node/pull/65495)\n* \\[[`afca0a912d`](https://github.com/nodejs/node/commit/afca0a912d)] - **(SEMVER-MINOR)** **crypto**: support loading private keys through STORE loaders (Filip Skokan) [#63949](https://github.com/nodejs/node/pull/63949)\n* \\[[`6274fccbd9`](https://github.com/nodejs/node/commit/6274fccbd9)] - **deps**: update OpenSSL to 3.5.8 (Node.js GitHub Bot) [#65542](https://github.com/nodejs/node/pull/65542)\n* \\[[`53cba013c7`](https://github.com/nodejs/node/commit/53cba013c7)] - **deps**: update Undici to 7.29.1 (Node.js GitHub Bot) [#65789](https://github.com/nodejs/node/pull/65789)\n* \\[[`0529772798`](https://github.com/nodejs/node/commit/0529772798)] - **(SEMVER-MINOR)** **lib,src**: improve histogram implementation (James M Snell) [#65024](https://github.com/nodejs/node/pull/65024)\n* \\[[`41c7062b81`](https://github.com/nodejs/node/commit/41c7062b81)] - **(SEMVER-MINOR)** **net**: improve performance of `net.BlockList` (James M Snell) [#64974](https://github.com/nodejs/node/pull/64974)\n* \\[[`5197b5a3c5`](https://github.com/nodejs/node/commit/5197b5a3c5)] - **(SEMVER-MINOR)** **perf\\_hooks**: add statistical hypothesis testing to histogram (James M Snell) [#65416](https://github.com/nodejs/node/pull/65416)\n* \\[[`35c635b032`](https://github.com/nodejs/node/commit/35c635b032)] - **(SEMVER-MINOR)** **util**: add non-throwing `MIMEType.parse` (James M Snell) [#64965](https://github.com/nodejs/node/pull/64965)\n\n### Commits\n"
+  },
+  {
+    "tag_name": "v26.8.1",
+    "name": "2026-08-26, Version 26.8.1 (Current), @aduh95",
+    "published_at": "2026-08-26T22:10:37Z",
+    "html_url": "https://github.com/nodejs/node/releases/tag/v26.8.1",
+    "body": "\n\n\n### Notable Changes\n\nOut-of-band release to fix `node --version` which was reporting an alpha version.\n\n### Commits\n\n* \\[[`ebd35a9eec`](https://github.com/nodejs/node/commit/ebd35a9eec)] - **src**: revert accidental alpha designation (Antoine du Hamel) [#65568](https://github.com/nodejs/node/pull/65568)\n* \\[[`0b0dd87fcc`](https://github.com/nodejs/node/commit/0b0dd87fcc)] - **tools**: fix `tools/nix/list-requisites.sh` (Antoine du Hamel) [#65560](https://github.com/nodejs/node/pull/65560)\n\n"
+  }
+]
