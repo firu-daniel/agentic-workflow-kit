@@ -1,5 +1,5 @@
 // Example pipeline: the latest releases of a GitHub repository → structured facts → an outline → a changelog post
-// → out/changelog.md (and a PR when GITHUB_TOKEN is set). Five library steps, one file. Runs green offline:
+// → out/changelog.md (and a PR once `publish` gets a `pr` param and GITHUB_TOKEN is set). Five library steps, one file. Runs green offline:
 // `AWK_OFFLINE=1 AWK_LLM=mock npm run start -- --pipeline example-changelog` uses the committed fixture and the mock;
 // without those variables it fetches the GitHub API and calls whichever LLM mode the environment selects. `publish`
 // is gated: the run stops before it with runs/example-changelog.review.md until the command is re-run with --approve.
